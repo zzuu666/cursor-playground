@@ -1,0 +1,24 @@
+{
+  "createdAt": "2026-02-28T17:16:28.986Z",
+  "provider": "mock-provider",
+  "policy": {
+    "maxTurns": 12,
+    "maxToolCalls": 20,
+    "toolTimeoutMs": 15000
+  },
+  "messages": [
+    {
+      "role": "user",
+      "content": "phase0 smoke test"
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "text",
+          "text": "Phase 0 provider is running. In Phase 1, replace this with real MiniMax API calls."
+        }
+      ]
+    }
+  ]
+}
