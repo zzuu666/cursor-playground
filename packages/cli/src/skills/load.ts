@@ -87,6 +87,56 @@ async function loadFromDir(
 }
 
 /**
+ * 从单个全局根目录加载 Skills：仅处理子目录，每个子目录内查找 SKILL.md 或 skill.json。
+ * pathPrefix 用于 transcript 来源标记，如 "agents" 或 "cursor"。
+ */
+export async function loadGlobalSkillsFromRoot(
+  rootDir: string,
+  pathPrefix: string
+): Promise<SkillEntry[]> {
+  if (!existsSync(rootDir)) return [];
+  const entries = await readdir(rootDir, { withFileTypes: true });
+  const results: SkillEntry[] = [];
+  for (const e of entries) {
+    if (!e.isDirectory()) continue;
+    const subDir = join(rootDir, e.name);
+    for (const name of SKILL_FILE_NAMES) {
+      const abs = join(subDir, name);
+      if (!existsSync(abs)) continue;
+      const displayPath = `${pathPrefix}:${e.name}`;
+      const entry = await loadOneFile(abs, displayPath);
+      if (entry) {
+        results.push(entry);
+        break;
+      }
+    }
+  }
+  return results;
+}
+
+function derivePathPrefix(rootDir: string): string {
+  if (rootDir.includes(".agents")) return "agents";
+  if (rootDir.includes(".cursor")) return "cursor";
+  return "global";
+}
+
+/**
+ * 从多个全局根目录依次加载 Skills，按顺序合并（先 .agents 后 .cursor 等）。
+ * globalSkillDirs 为已解析的绝对路径；pathPrefix 按目录名推导，如 ".agents/skills" -> "agents"，".cursor/skills" -> "cursor"。
+ */
+export async function loadAllGlobalSkills(
+  globalSkillDirs: string[]
+): Promise<SkillEntry[]> {
+  const results: SkillEntry[] = [];
+  for (const rootDir of globalSkillDirs) {
+    const pathPrefix = derivePathPrefix(rootDir);
+    const entries = await loadGlobalSkillsFromRoot(rootDir, pathPrefix);
+    results.push(...entries);
+  }
+  return results;
+}
+
+/**
  * 根据 skillPaths 加载所有 Skill：每项为文件则按扩展名解析，为目录则扫描 SKILL.md / skill.json。
  * 返回 path（用于来源标记）、content、charCount 列表。
  */

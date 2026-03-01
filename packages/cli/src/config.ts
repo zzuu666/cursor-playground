@@ -1,6 +1,7 @@
 import { config as loadDotenv } from "dotenv";
 import { readFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
+import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { LoopPolicy } from "./agent/policy.js";
@@ -39,6 +40,10 @@ export interface ConfigFile {
   allowedCommands?: string[];
   /** Skill 文件或目录路径列表，用于加载 SKILL.md / skill.json 并注入 system prompt。 */
   skillPaths?: string[];
+  /** 全局 Skill 根目录列表（如 ~/.agents/skills、~/.cursor/skills）；若提供则完全替换默认列表。 */
+  globalSkillDirs?: string[];
+  /** 是否跳过加载全局 Skills。 */
+  skipGlobalSkills?: boolean;
 }
 
 /** Resolved run config after merging defaults → config file → env → CLI. */
@@ -57,6 +62,10 @@ export interface ResolvedConfig {
   skillPaths?: string[];
   /** 合并默认 SYSTEM_PROMPT 与 Skill 片段后的完整 system prompt；由入口在 loadConfig 后填充。 */
   systemPrompt?: string;
+  /** 解析后的全局 Skill 根目录列表（绝对路径）；用于按子目录发现 skill。 */
+  globalSkillDirs?: string[];
+  /** 是否跳过加载全局 Skills。 */
+  skipGlobalSkills?: boolean;
 }
 
 export interface MinimaxConfig {
@@ -103,6 +112,20 @@ function mergePolicy(base: LoopPolicy, overrides: Partial<LoopPolicy> | undefine
  * Find config file path: either explicit path or first existing in cwd.
  * Returns undefined if no explicit path and no file found.
  */
+/** 解析路径中的 ~ 为用户主目录（跨平台）。 */
+function resolveTilde(path: string): string {
+  if (path.startsWith("~")) {
+    return join(homedir(), path.slice(1));
+  }
+  return path;
+}
+
+/** 默认全局 Skill 根目录：先 .agents 后 .cursor。 */
+export function getDefaultGlobalSkillDirs(): string[] {
+  const home = homedir();
+  return [join(home, ".agents", "skills"), join(home, ".cursor", "skills")];
+}
+
 function resolveConfigPath(configPath: string | undefined, cwd: string): string | undefined {
   if (configPath != null && configPath.trim() !== "") {
     return configPath;
@@ -151,6 +174,11 @@ async function readConfigFile(filePath: string): Promise<ConfigFile> {
     const list = (obj.skillPaths as unknown[]).filter((x): x is string => typeof x === "string");
     if (list.length > 0) config.skillPaths = list;
   }
+  if (Array.isArray(obj.globalSkillDirs)) {
+    const list = (obj.globalSkillDirs as unknown[]).filter((x): x is string => typeof x === "string");
+    if (list.length > 0) config.globalSkillDirs = list;
+  }
+  if (typeof obj.skipGlobalSkills === "boolean") config.skipGlobalSkills = obj.skipGlobalSkills;
   return config;
 }
 
@@ -171,6 +199,8 @@ export async function loadConfig(options: LoadConfigOptions): Promise<ResolvedCo
     approval: DEFAULT_APPROVAL,
     verbose: false,
     dryRun: false,
+    globalSkillDirs: getDefaultGlobalSkillDirs(),
+    skipGlobalSkills: false,
   };
 
   let merged: ResolvedConfig = { ...defaults, policy: { ...defaults.policy } };
@@ -188,7 +218,24 @@ export async function loadConfig(options: LoadConfigOptions): Promise<ResolvedCo
     if (fileConfig.approval != null) merged.approval = fileConfig.approval;
     if (fileConfig.allowedCommands != null) merged.allowedCommands = fileConfig.allowedCommands;
     if (fileConfig.skillPaths != null) merged.skillPaths = [...fileConfig.skillPaths];
+    if (fileConfig.globalSkillDirs != null)
+      merged.globalSkillDirs = fileConfig.globalSkillDirs.map(resolveTilde);
+    if (fileConfig.skipGlobalSkills != null) merged.skipGlobalSkills = fileConfig.skipGlobalSkills;
     merged.policy = mergePolicy(merged.policy, fileConfig.policy);
+  }
+
+  const envGlobalSkillDirs = process.env.GLOBAL_SKILLS_DIRS?.trim();
+  if (envGlobalSkillDirs) {
+    const dirs = envGlobalSkillDirs
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean)
+      .map(resolveTilde);
+    if (dirs.length > 0) merged.globalSkillDirs = dirs;
+  }
+  const envSkipGlobal = process.env.MINI_AGENT_SKIP_GLOBAL_SKILLS?.trim();
+  if (envSkipGlobal && envSkipGlobal !== "0" && envSkipGlobal.toLowerCase() !== "false") {
+    merged.skipGlobalSkills = true;
   }
 
   const envBaseURL = process.env.MINIMAX_BASE_URL?.trim();

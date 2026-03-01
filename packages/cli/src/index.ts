@@ -23,7 +23,7 @@ import {
 import type { ChatProvider } from "./providers/base.js";
 import { createProvider, parseProviderId } from "./providers/factory.js";
 import { buildSystemPrompt } from "./skills/build-system-prompt.js";
-import { loadSkills } from "./skills/load.js";
+import { loadAllGlobalSkills, loadSkills } from "./skills/load.js";
 import { createExecuteCommandTool } from "./tools/execute-command.js";
 import { createGlobSearchTool } from "./tools/glob-search.js";
 import { createReadFileTool } from "./tools/read-file.js";
@@ -159,12 +159,18 @@ async function main(): Promise<void> {
   }
 
   let skillsLoaded: { path: string; charCount: number }[] | undefined;
-  if (resolved.skillPaths != null && resolved.skillPaths.length > 0) {
-    const skillEntries = await loadSkills(resolved.skillPaths, process.cwd());
-    if (skillEntries.length > 0) {
-      resolved = { ...resolved, systemPrompt: buildSystemPrompt(skillEntries, SYSTEM_PROMPT) };
-      skillsLoaded = skillEntries.map((e) => ({ path: e.path, charCount: e.charCount }));
-    }
+  const globalEntries =
+    !resolved.skipGlobalSkills && resolved.globalSkillDirs != null && resolved.globalSkillDirs.length > 0
+      ? await loadAllGlobalSkills(resolved.globalSkillDirs)
+      : [];
+  const projectEntries =
+    resolved.skillPaths != null && resolved.skillPaths.length > 0
+      ? await loadSkills(resolved.skillPaths, process.cwd())
+      : [];
+  const allEntries = [...globalEntries, ...projectEntries];
+  if (allEntries.length > 0) {
+    resolved = { ...resolved, systemPrompt: buildSystemPrompt(allEntries, SYSTEM_PROMPT) };
+    skillsLoaded = allEntries.map((e) => ({ path: e.path, charCount: e.charCount }));
   }
 
   const registry = new ToolRegistry();
