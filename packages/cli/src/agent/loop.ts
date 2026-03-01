@@ -1,10 +1,19 @@
+import type { ApprovalMode } from "../config.js";
 import { LoopLimitError, LoopSpinDetectedError } from "../infra/errors.js";
+import type { ApprovalLogEntry } from "../infra/logger.js";
 import { logStreamTurn, logToolCall, logTurnDiagnostics } from "../infra/logger.js";
 import type { ChatProvider } from "../providers/base.js";
 import type { ToolRegistry } from "../tools/registry.js";
 import { DEFAULT_LOOP_POLICY, type LoopPolicy } from "./policy.js";
 import type { AssistantContentBlock, ToolUseBlock } from "./session.js";
 import { AgentSession } from "./session.js";
+
+const INPUT_SUMMARY_MAX = 200;
+
+function inputSummary(input: Record<string, unknown>): string {
+  const s = JSON.stringify(input);
+  return s.length <= INPUT_SUMMARY_MAX ? s : s.slice(0, INPUT_SUMMARY_MAX) + "...";
+}
 
 function getTextFromBlocks(blocks: AssistantContentBlock[]): string {
   return blocks
@@ -33,12 +42,21 @@ export interface LoopResult {
   toolCalls: number;
   diagnostics: TurnDiagnostic[];
   elapsedTotalMs: number;
+  /** 本次 run 内发生的工具批准/拒绝记录。 */
+  approvalLog: ApprovalLogEntry[];
 }
 
 export interface RunOptions {
   onStreamText?: (delta: string) => void;
   /** When true, log per-turn request/response summary and tool in/out lengths. */
   verbose?: boolean;
+  /** 批准策略，默认 auto。 */
+  approvalMode?: ApprovalMode;
+  /** 仅当 approvalMode 为 prompt 且工具 requiresApproval 时调用。 */
+  onApprovalRequest?: (
+    toolName: string,
+    inputSummary: string
+  ) => Promise<{ approved: boolean; reason?: string }>;
 }
 
 export class AgentLoop {
@@ -59,8 +77,11 @@ export class AgentLoop {
     let toolCalls = 0;
     const recentFingerprints: string[] = [];
     const diagnostics: TurnDiagnostic[] = [];
+    const approvalLog: ApprovalLogEntry[] = [];
     const runStartTime = Date.now();
     const maxFingerprintHistory = Math.max(20, this.policy.maxSameToolRepeat * 4);
+    const approvalMode = options.approvalMode ?? "auto";
+    const onApprovalRequest = options.onApprovalRequest;
 
     const useStream =
       options.onStreamText != null && this.provider.streamComplete != null;
@@ -106,6 +127,7 @@ export class AgentLoop {
           toolCalls,
           diagnostics,
           elapsedTotalMs: Date.now() - runStartTime,
+          approvalLog,
         };
       }
 
@@ -130,26 +152,80 @@ export class AgentLoop {
         }
 
         const tool = this.registry?.get(toolUse.name);
+        const summary = inputSummary(input);
+
+        const pushApproval = (decision: "approved" | "rejected", userReason?: string): void => {
+          approvalLog.push({
+            toolName: toolUse.name,
+            inputSummary: summary,
+            decision,
+            ...(userReason != null && userReason !== "" && { userReason }),
+            timestamp: new Date().toISOString(),
+          });
+        };
+
         if (tool) {
-          try {
-            const content = await tool.execute(input);
-            session.addToolResult(toolUse.id, content, false);
-            const resultBytes = Buffer.byteLength(content, "utf-8");
-            logToolCall(toolUse.name, input, {
-              ok: true,
-              bytes: resultBytes,
-            });
-            if (verbose) {
-              const inputBytes = Buffer.byteLength(JSON.stringify(input), "utf-8");
-              process.stderr.write(`[verbose] tool ${toolUse.name} inputLen=${inputBytes} resultLen=${resultBytes}\n`);
+          const needsApproval = tool.requiresApproval === true;
+          let shouldExecute = true;
+          let rejectMessage: string | undefined;
+
+          if (needsApproval) {
+            if (approvalMode === "never") {
+              shouldExecute = false;
+              rejectMessage =
+                "This tool requires user approval. Current policy is 'never', so the request was rejected. Please try another approach.";
+              pushApproval("rejected");
+            } else if (approvalMode === "prompt") {
+              if (onApprovalRequest) {
+                const { approved, reason } = await onApprovalRequest(toolUse.name, summary);
+                if (!approved) {
+                  shouldExecute = false;
+                  rejectMessage =
+                    reason != null && reason.trim() !== ""
+                      ? `User rejected this tool call. Reason: ${reason.trim()}. Please try another approach.`
+                      : "User rejected this tool call. Please try another approach.";
+                  pushApproval("rejected", reason);
+                } else {
+                  pushApproval("approved");
+                }
+              } else {
+                shouldExecute = false;
+                rejectMessage =
+                  "This tool requires user approval but no approval handler is available (e.g. not a TTY). Request rejected. Please try another approach.";
+                pushApproval("rejected");
+              }
+            } else {
+              pushApproval("approved");
             }
-          } catch (err) {
-            const message = err instanceof Error ? err.message : String(err);
-            session.addToolResult(toolUse.id, `Tool error: ${message}`, true);
-            logToolCall(toolUse.name, input, { ok: false, error: message });
+          }
+
+          if (!shouldExecute && rejectMessage != null) {
+            session.addToolResult(toolUse.id, rejectMessage, false);
+            logToolCall(toolUse.name, input, { ok: false, error: "rejected by user or policy" });
             if (verbose) {
-              const inputBytes = Buffer.byteLength(JSON.stringify(input), "utf-8");
-              process.stderr.write(`[verbose] tool ${toolUse.name} inputLen=${inputBytes} error\n`);
+              process.stderr.write(`[verbose] tool ${toolUse.name} approval rejected\n`);
+            }
+          } else {
+            try {
+              const content = await tool.execute(input);
+              session.addToolResult(toolUse.id, content, false);
+              const resultBytes = Buffer.byteLength(content, "utf-8");
+              logToolCall(toolUse.name, input, {
+                ok: true,
+                bytes: resultBytes,
+              });
+              if (verbose) {
+                const inputBytes = Buffer.byteLength(JSON.stringify(input), "utf-8");
+                process.stderr.write(`[verbose] tool ${toolUse.name} inputLen=${inputBytes} resultLen=${resultBytes}\n`);
+              }
+            } catch (err) {
+              const message = err instanceof Error ? err.message : String(err);
+              session.addToolResult(toolUse.id, `Tool error: ${message}`, true);
+              logToolCall(toolUse.name, input, { ok: false, error: message });
+              if (verbose) {
+                const inputBytes = Buffer.byteLength(JSON.stringify(input), "utf-8");
+                process.stderr.write(`[verbose] tool ${toolUse.name} inputLen=${inputBytes} error\n`);
+              }
             }
           }
         } else {

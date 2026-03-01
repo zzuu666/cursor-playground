@@ -52,6 +52,15 @@ export interface TranscriptMeta {
   spinDetected?: boolean;
 }
 
+/** 单次工具批准/拒绝记录，用于 transcript 审计。 */
+export interface ApprovalLogEntry {
+  toolName: string;
+  inputSummary: string;
+  decision: "approved" | "rejected";
+  userReason?: string;
+  timestamp?: string;
+}
+
 export interface TranscriptPayload {
   createdAt: string;
   provider: string;
@@ -59,6 +68,8 @@ export interface TranscriptPayload {
   messages: ConversationMessage[];
   result?: TranscriptResult;
   meta?: TranscriptMeta;
+  /** 本次 run 内发生的工具批准/拒绝记录。 */
+  approvalLog?: ApprovalLogEntry[];
 }
 
 export async function writeTranscript(

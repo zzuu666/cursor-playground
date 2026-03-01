@@ -12,6 +12,8 @@ export interface Tool {
   name: string;
   description: string;
   inputSchema: ToolInputSchema;
+  /** 为 true 时，在 approval 策略为 prompt 时会等待用户批准；never 时直接拒绝。 */
+  requiresApproval?: boolean;
   execute(args: Record<string, unknown>): Promise<string>;
 }
 

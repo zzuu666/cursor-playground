@@ -14,6 +14,19 @@ const DEFAULT_PROVIDER = "minimax";
 
 const CONFIG_FILE_NAMES = ["mini-agent.config.json", ".mini-agent.json"] as const;
 
+/** 用户批准策略：never 禁止需批准的工具；auto 自动通过；prompt 每次等待用户 y/n。 */
+export type ApprovalMode = "never" | "auto" | "prompt";
+
+const APPROVAL_MODES: ApprovalMode[] = ["never", "auto", "prompt"];
+const DEFAULT_APPROVAL: ApprovalMode = "auto";
+
+function parseApprovalMode(value: unknown): ApprovalMode | undefined {
+  if (typeof value !== "string") return undefined;
+  const s = value.trim().toLowerCase();
+  if (APPROVAL_MODES.includes(s as ApprovalMode)) return s as ApprovalMode;
+  return undefined;
+}
+
 /** Config file schema (all optional). */
 export interface ConfigFile {
   provider?: string;
@@ -21,6 +34,7 @@ export interface ConfigFile {
   transcriptDir?: string;
   baseURL?: string;
   policy?: Partial<LoopPolicy>;
+  approval?: ApprovalMode;
 }
 
 /** Resolved run config after merging defaults → config file → env → CLI. */
@@ -30,6 +44,7 @@ export interface ResolvedConfig {
   transcriptDir: string;
   baseURL: string;
   policy: LoopPolicy;
+  approval: ApprovalMode;
   verbose: boolean;
   dryRun: boolean;
 }
@@ -46,7 +61,7 @@ export interface LoadConfigOptions {
   cwd: string;
   /** CLI overrides (highest priority). */
   cli?: Partial<
-    Pick<ResolvedConfig, "provider" | "model" | "transcriptDir" | "verbose" | "dryRun"> & {
+    Pick<ResolvedConfig, "provider" | "model" | "transcriptDir" | "approval" | "verbose" | "dryRun"> & {
       policy?: Partial<LoopPolicy>;
     }
   >;
@@ -95,6 +110,8 @@ async function readConfigFile(filePath: string): Promise<ConfigFile> {
   if (typeof obj.model === "string") config.model = obj.model;
   if (typeof obj.transcriptDir === "string") config.transcriptDir = obj.transcriptDir;
   if (typeof obj.baseURL === "string") config.baseURL = obj.baseURL;
+  const approval = parseApprovalMode(obj.approval);
+  if (approval != null) config.approval = approval;
   if (typeof obj.policy === "object" && obj.policy !== null) {
     const p = obj.policy as Record<string, unknown>;
     config.policy = {};
@@ -124,6 +141,7 @@ export async function loadConfig(options: LoadConfigOptions): Promise<ResolvedCo
     transcriptDir: join(cwd, "transcripts"),
     baseURL: DEFAULT_BASE_URL,
     policy: { ...DEFAULT_LOOP_POLICY },
+    approval: DEFAULT_APPROVAL,
     verbose: false,
     dryRun: false,
   };
@@ -140,6 +158,7 @@ export async function loadConfig(options: LoadConfigOptions): Promise<ResolvedCo
     if (fileConfig.model != null) merged.model = fileConfig.model;
     if (fileConfig.transcriptDir != null) merged.transcriptDir = fileConfig.transcriptDir;
     if (fileConfig.baseURL != null) merged.baseURL = fileConfig.baseURL;
+    if (fileConfig.approval != null) merged.approval = fileConfig.approval;
     merged.policy = mergePolicy(merged.policy, fileConfig.policy);
   }
 
@@ -153,6 +172,7 @@ export async function loadConfig(options: LoadConfigOptions): Promise<ResolvedCo
   if (cli.provider != null) merged.provider = cli.provider;
   if (cli.model != null) merged.model = cli.model;
   if (cli.transcriptDir != null) merged.transcriptDir = cli.transcriptDir;
+  if (cli.approval != null) merged.approval = cli.approval;
   if (cli.verbose != null) merged.verbose = cli.verbose;
   if (cli.dryRun != null) merged.dryRun = cli.dryRun;
   if (cli.policy != null) merged.policy = mergePolicy(merged.policy, cli.policy);

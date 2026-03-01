@@ -33,20 +33,47 @@ async function loadPrompt(rawPrompt?: string): Promise<string | null> {
   return stdinText.length > 0 ? stdinText : null;
 }
 
+type RunOneTurnOpts = {
+  stream: boolean;
+  verbose: boolean;
+  approvalMode: ResolvedConfig["approval"];
+  onApprovalRequest?: (toolName: string, inputSummary: string) => Promise<{ approved: boolean; reason?: string }>;
+};
+
 function runOneTurn(
   loop: AgentLoop,
   session: AgentSession,
   prompt: string,
-  opts: { stream: boolean; verbose: boolean },
+  opts: RunOneTurnOpts,
   provider: ChatProvider
 ): Promise<LoopResult> {
-  const runOptions: { onStreamText?: (delta: string) => void; verbose?: boolean } = {
+  const runOptions = {
     verbose: opts.verbose,
+    approvalMode: opts.approvalMode,
+    ...(opts.onApprovalRequest != null && { onApprovalRequest: opts.onApprovalRequest }),
+    ...(opts.stream && provider.streamComplete && { onStreamText: (delta: string) => output.write(delta) }),
   };
-  if (opts.stream && provider.streamComplete) {
-    runOptions.onStreamText = (delta: string) => output.write(delta);
-  }
   return loop.run(session, prompt, runOptions);
+}
+
+function buildApprovalHandler(
+  rl: ReturnType<typeof createInterface> | null
+): (toolName: string, inputSummary: string) => Promise<{ approved: boolean; reason?: string }> {
+  const iface = rl ?? createInterface({ input, output });
+  return (toolName: string, _inputSummary: string) =>
+    new Promise((resolve) => {
+      iface.question(`[approval] Approve tool "${toolName}"? (y/n or n <reason>): `, (answer) => {
+        const trimmed = answer.trim();
+        const lower = trimmed.toLowerCase();
+        const approved = lower === "y" || lower === "yes";
+        let reason: string | undefined;
+        if (!approved && (lower.startsWith("n") || lower === "no")) {
+          const afterN = trimmed.slice(1).trim();
+          if (afterN) reason = afterN;
+        }
+        resolve(approved ? { approved: true } : { approved: false, ...(reason != null && { reason }) });
+      });
+    });
 }
 
 async function main(): Promise<void> {
@@ -60,6 +87,7 @@ async function main(): Promise<void> {
     .option("--model <name>", "model name (overrides config/env)")
     .option("--stream", "stream model output token-by-token")
     .option("-t, --transcript-dir <path>", "transcript output directory")
+    .option("--approval <mode>", "tool approval: never | auto | prompt", "auto")
     .option("--verbose", "print per-turn request/response summary and tool in/out lengths")
     .option("--dry-run", "only print prompt and tool list, do not call LLM or tools");
 
@@ -71,14 +99,20 @@ async function main(): Promise<void> {
     model?: string;
     stream: boolean;
     transcriptDir?: string;
+    approval: string;
     verbose: boolean;
     dryRun: boolean;
   }>();
 
   let resolved: ResolvedConfig;
   try {
+    const approvalMode =
+      opts.approval === "never" || opts.approval === "auto" || opts.approval === "prompt"
+        ? opts.approval
+        : "auto";
     const cliOverrides: Parameters<typeof loadConfig>[0]["cli"] = {
       provider: opts.provider,
+      approval: approvalMode,
       verbose: opts.verbose ?? false,
       dryRun: opts.dryRun ?? false,
     };
@@ -134,18 +168,28 @@ async function main(): Promise<void> {
     }
   }
 
+  const effectiveApproval =
+    resolved.approval === "prompt" && !input.isTTY ? "never" : resolved.approval;
+  if (resolved.approval === "prompt" && !input.isTTY) {
+    process.stderr.write("mini-agent: --approval prompt requires TTY; falling back to never.\n");
+  }
+
   const session = new AgentSession();
   const loop = new AgentLoop(provider, resolved.policy, registry);
 
   if (initialPrompt != null) {
+    const approvalRl =
+      effectiveApproval === "prompt" && input.isTTY ? createInterface({ input, output }) : null;
+    const runOpts: RunOneTurnOpts = {
+      stream: opts.stream ?? false,
+      verbose: resolved.verbose,
+      approvalMode: effectiveApproval,
+      ...(effectiveApproval === "prompt" && input.isTTY && {
+        onApprovalRequest: buildApprovalHandler(approvalRl),
+      }),
+    };
     try {
-      const result = await runOneTurn(
-        loop,
-        session,
-        initialPrompt,
-        { stream: opts.stream ?? false, verbose: resolved.verbose },
-        provider
-      );
+      const result = await runOneTurn(loop, session, initialPrompt, runOpts, provider);
       if (!opts.stream && result.finalText) {
         output.write(`${result.finalText}\n`);
       }
@@ -161,6 +205,7 @@ async function main(): Promise<void> {
           diagnostics: result.diagnostics,
           elapsedTotalMs: result.elapsedTotalMs,
         },
+        ...(result.approvalLog.length > 0 && { approvalLog: result.approvalLog }),
       });
       output.write(
         `turns=${result.turns}, toolCalls=${result.toolCalls}, elapsed=${result.elapsedTotalMs}ms\ntranscript=${transcriptPath}\n`
@@ -194,6 +239,13 @@ async function main(): Promise<void> {
   const rl = createInterface({ input, output });
   output.write("mini-agent REPL (empty line to exit)\n");
 
+  const replRunOpts: RunOneTurnOpts = {
+    stream: opts.stream ?? false,
+    verbose: resolved.verbose,
+    approvalMode: effectiveApproval,
+    ...(effectiveApproval === "prompt" && input.isTTY && { onApprovalRequest: buildApprovalHandler(rl) }),
+  };
+
   for (;;) {
     const line = await new Promise<string>((resolve) => {
       rl.question("> ", resolve);
@@ -201,13 +253,7 @@ async function main(): Promise<void> {
     const prompt = line.trim();
     if (prompt.length === 0) break;
     try {
-      const result = await runOneTurn(
-        loop,
-        session,
-        prompt,
-        { stream: opts.stream ?? false, verbose: resolved.verbose },
-        provider
-      );
+      const result = await runOneTurn(loop, session, prompt, replRunOpts, provider);
       if (!opts.stream && result.finalText) {
         output.write(`${result.finalText}\n`);
       }
