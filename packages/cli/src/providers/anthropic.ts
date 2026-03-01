@@ -5,6 +5,7 @@ import type {
   ToolResultBlock,
   ToolUseBlock,
 } from "../agent/session.js";
+import { retryWithBackoff } from "../infra/retry.js";
 import { SYSTEM_PROMPT } from "../prompts/system.js";
 import type { ChatProvider, StreamCallbacks } from "./base.js";
 import type { ToolInputSchema } from "../tools/types.js";
@@ -20,6 +21,8 @@ export interface AnthropicProviderOptions {
   baseURL: string;
   model: string;
   tools?: AnthropicToolSpec[];
+  maxRetries?: number;
+  retryDelayMs?: number;
 }
 
 const MAX_TOKENS = 4096;
@@ -101,6 +104,8 @@ export class AnthropicProvider implements ChatProvider {
   private readonly client: Anthropic;
   private readonly model: string;
   private readonly tools: AnthropicToolSpec[];
+  private readonly maxRetries: number;
+  private readonly retryDelayMs: number;
 
   constructor(options: AnthropicProviderOptions) {
     this.client = new Anthropic({
@@ -109,55 +114,67 @@ export class AnthropicProvider implements ChatProvider {
     });
     this.model = options.model;
     this.tools = options.tools ?? [];
+    this.maxRetries = options.maxRetries ?? 3;
+    this.retryDelayMs = options.retryDelayMs ?? 1000;
   }
 
   async complete(
     messages: ConversationMessage[]
   ): Promise<AssistantContentBlock[]> {
-    const anthropicMessages = toAnthropicMessages(messages);
-    const base = {
-      model: this.model as "claude-3-5-sonnet-20241022",
-      max_tokens: MAX_TOKENS,
-      system: SYSTEM_PROMPT,
-      messages: anthropicMessages as Parameters<Anthropic["messages"]["create"]>[0]["messages"],
-    };
-    type CreateParams = Parameters<Anthropic["messages"]["create"]>[0];
-    const createBody: CreateParams =
-      this.tools.length > 0 ? { ...base, tools: this.tools as NonNullable<CreateParams["tools"]> } : base;
-    const response = await this.client.messages.create(createBody);
+    return retryWithBackoff(
+      async () => {
+        const anthropicMessages = toAnthropicMessages(messages);
+        const base = {
+          model: this.model as "claude-3-5-sonnet-20241022",
+          max_tokens: MAX_TOKENS,
+          system: SYSTEM_PROMPT,
+          messages: anthropicMessages as Parameters<Anthropic["messages"]["create"]>[0]["messages"],
+        };
+        type CreateParams = Parameters<Anthropic["messages"]["create"]>[0];
+        const createBody: CreateParams =
+          this.tools.length > 0 ? { ...base, tools: this.tools as NonNullable<CreateParams["tools"]> } : base;
+        const response = await this.client.messages.create(createBody);
 
-    const content = (response as { content?: Array<{ type: string; text?: string; thinking?: string; id?: string; name?: string; input?: unknown }> }).content;
-    if (Array.isArray(content)) {
-      return fromAnthropicContent(content);
-    }
-    return [];
+        const content = (response as { content?: Array<{ type: string; text?: string; thinking?: string; id?: string; name?: string; input?: unknown }> }).content;
+        if (Array.isArray(content)) {
+          return fromAnthropicContent(content);
+        }
+        return [];
+      },
+      { maxRetries: this.maxRetries, retryDelayMs: this.retryDelayMs }
+    );
   }
 
   async streamComplete(
     messages: ConversationMessage[],
     callbacks: StreamCallbacks
   ): Promise<AssistantContentBlock[]> {
-    const anthropicMessages = toAnthropicMessages(messages);
-    const base = {
-      model: this.model as "claude-3-5-sonnet-20241022",
-      max_tokens: MAX_TOKENS,
-      system: SYSTEM_PROMPT,
-      messages: anthropicMessages as Parameters<Anthropic["messages"]["stream"]>[0]["messages"],
-    };
-    type StreamParams = Parameters<Anthropic["messages"]["stream"]>[0];
-    const streamBody: StreamParams =
-      this.tools.length > 0 ? { ...base, tools: this.tools as NonNullable<StreamParams["tools"]> } : base;
-    const stream = this.client.messages.stream(streamBody);
-    if (callbacks.onText) {
-      stream.on("text", (delta: string) => {
-        callbacks.onText?.(delta);
-      });
-    }
-    const final = await stream.finalMessage();
-    const content = (final as { content?: Array<{ type: string; text?: string; thinking?: string; id?: string; name?: string; input?: unknown }> }).content;
-    if (Array.isArray(content)) {
-      return fromAnthropicContent(content);
-    }
-    return [];
+    return retryWithBackoff(
+      async () => {
+        const anthropicMessages = toAnthropicMessages(messages);
+        const base = {
+          model: this.model as "claude-3-5-sonnet-20241022",
+          max_tokens: MAX_TOKENS,
+          system: SYSTEM_PROMPT,
+          messages: anthropicMessages as Parameters<Anthropic["messages"]["stream"]>[0]["messages"],
+        };
+        type StreamParams = Parameters<Anthropic["messages"]["stream"]>[0];
+        const streamBody: StreamParams =
+          this.tools.length > 0 ? { ...base, tools: this.tools as NonNullable<StreamParams["tools"]> } : base;
+        const stream = this.client.messages.stream(streamBody);
+        if (callbacks.onText) {
+          stream.on("text", (delta: string) => {
+            callbacks.onText?.(delta);
+          });
+        }
+        const final = await stream.finalMessage();
+        const content = (final as { content?: Array<{ type: string; text?: string; thinking?: string; id?: string; name?: string; input?: unknown }> }).content;
+        if (Array.isArray(content)) {
+          return fromAnthropicContent(content);
+        }
+        return [];
+      },
+      { maxRetries: this.maxRetries, retryDelayMs: this.retryDelayMs }
+    );
   }
 }

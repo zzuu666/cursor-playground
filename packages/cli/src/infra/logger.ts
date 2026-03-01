@@ -41,15 +41,24 @@ function redactObject(obj: unknown): unknown {
   return out;
 }
 
-interface TranscriptPayload {
+export interface TranscriptResult {
+  turns: number;
+  toolCalls: number;
+  diagnostics: Array<{ turn: number; toolCount: number; elapsedMs: number }>;
+  elapsedTotalMs: number;
+}
+
+export interface TranscriptMeta {
+  spinDetected?: boolean;
+}
+
+export interface TranscriptPayload {
   createdAt: string;
   provider: string;
-  policy: {
-    maxTurns: number;
-    maxToolCalls: number;
-    toolTimeoutMs: number;
-  };
+  policy: object;
   messages: ConversationMessage[];
+  result?: TranscriptResult;
+  meta?: TranscriptMeta;
 }
 
 export async function writeTranscript(
@@ -101,4 +110,14 @@ export function logToolCall(
 
 export function logStreamTurn(turn: number, phase: "start" | "end"): void {
   process.stderr.write(`[stream] turn ${turn} ${phase}\n`);
+}
+
+export function logTurnDiagnostics(
+  turn: number,
+  toolCount: number,
+  elapsedMs: number
+): void {
+  process.stderr.write(
+    `[turn ${turn}] tools=${toolCount}, elapsed=${elapsedMs}ms\n`
+  );
 }

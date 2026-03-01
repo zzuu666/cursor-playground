@@ -2,10 +2,11 @@ import { createInterface } from "node:readline";
 import { stdin as input, stdout as output } from "node:process";
 import { join } from "node:path";
 import { Command } from "commander";
-import { AgentLoop } from "./agent/loop.js";
+import { AgentLoop, type LoopResult } from "./agent/loop.js";
 import { DEFAULT_LOOP_POLICY } from "./agent/policy.js";
 import { AgentSession } from "./agent/session.js";
 import { getMinimaxConfig } from "./config.js";
+import { LoopSpinDetectedError } from "./infra/errors.js";
 import { redactForLog, writeTranscript } from "./infra/logger.js";
 import type { ChatProvider } from "./providers/base.js";
 import { AnthropicProvider } from "./providers/anthropic.js";
@@ -39,7 +40,7 @@ function runOneTurn(
   prompt: string,
   stream: boolean,
   provider: ChatProvider
-): Promise<{ finalText: string; turns: number; toolCalls: number }> {
+): Promise<LoopResult> {
   const runOptions =
     stream && provider.streamComplete
       ? { onStreamText: (delta: string) => output.write(delta) }
@@ -88,7 +89,12 @@ async function main(): Promise<void> {
             description: t.description,
             input_schema: t.inputSchema,
           }));
-          return new AnthropicProvider({ ...cfg, tools: apiTools });
+          return new AnthropicProvider({
+            ...cfg,
+            tools: apiTools,
+            maxRetries: DEFAULT_LOOP_POLICY.maxRetries,
+            retryDelayMs: DEFAULT_LOOP_POLICY.retryDelayMs,
+          });
         })();
 
   const session = new AgentSession();
@@ -97,26 +103,50 @@ async function main(): Promise<void> {
   const initialPrompt = await loadPrompt(options.prompt);
 
   if (initialPrompt != null) {
-    const result = await runOneTurn(
-      loop,
-      session,
-      initialPrompt,
-      options.stream ?? false,
-      provider
-    );
-    if (!options.stream && result.finalText) {
-      output.write(`${result.finalText}\n`);
+    try {
+      const result = await runOneTurn(
+        loop,
+        session,
+        initialPrompt,
+        options.stream ?? false,
+        provider
+      );
+      if (!options.stream && result.finalText) {
+        output.write(`${result.finalText}\n`);
+      }
+      if (options.stream) output.write("\n");
+      const transcriptPath = await writeTranscript(options.transcriptDir, {
+        createdAt: new Date().toISOString(),
+        provider: provider.name,
+        policy: DEFAULT_LOOP_POLICY,
+        messages: session.getMessages(),
+        result: {
+          turns: result.turns,
+          toolCalls: result.toolCalls,
+          diagnostics: result.diagnostics,
+          elapsedTotalMs: result.elapsedTotalMs,
+        },
+      });
+      output.write(
+        `turns=${result.turns}, toolCalls=${result.toolCalls}, elapsed=${result.elapsedTotalMs}ms\ntranscript=${transcriptPath}\n`
+      );
+    } catch (err) {
+      if (err instanceof LoopSpinDetectedError) {
+        const transcriptPath = await writeTranscript(options.transcriptDir, {
+          createdAt: new Date().toISOString(),
+          provider: provider.name,
+          policy: DEFAULT_LOOP_POLICY,
+          messages: session.getMessages(),
+          meta: { spinDetected: true },
+        });
+        process.stderr.write(
+          `error: ${err.message}\ntranscript=${transcriptPath}\n`
+        );
+      } else {
+        throw err;
+      }
+      process.exitCode = 1;
     }
-    if (options.stream) output.write("\n");
-    const transcriptPath = await writeTranscript(options.transcriptDir, {
-      createdAt: new Date().toISOString(),
-      provider: provider.name,
-      policy: DEFAULT_LOOP_POLICY,
-      messages: session.getMessages(),
-    });
-    output.write(
-      `turns=${result.turns}, toolCalls=${result.toolCalls}\ntranscript=${transcriptPath}\n`
-    );
     return;
   }
 
@@ -147,10 +177,22 @@ async function main(): Promise<void> {
         output.write(`${result.finalText}\n`);
       }
       if (options.stream) output.write("\n");
-      output.write(`[turns=${result.turns}]\n`);
+      output.write(
+        `[turns=${result.turns}, toolCalls=${result.toolCalls}, elapsed=${result.elapsedTotalMs}ms]\n`
+      );
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       process.stderr.write(`error: ${msg}\n`);
+      if (err instanceof LoopSpinDetectedError) {
+        const transcriptPath = await writeTranscript(options.transcriptDir, {
+          createdAt: new Date().toISOString(),
+          provider: provider.name,
+          policy: DEFAULT_LOOP_POLICY,
+          messages: session.getMessages(),
+          meta: { spinDetected: true },
+        });
+        process.stderr.write(`transcript=${transcriptPath}\n`);
+      }
     }
   }
 
