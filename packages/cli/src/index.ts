@@ -3,7 +3,7 @@ import { stdin as input, stdout as output } from "node:process";
 import { Command } from "commander";
 import { AgentLoop, type LoopResult } from "./agent/loop.js";
 import { AgentSession } from "./agent/session.js";
-import { getMinimaxConfig, loadConfig, type ResolvedConfig } from "./config.js";
+import { loadConfig, type ResolvedConfig } from "./config.js";
 import { EXIT_BUSINESS, EXIT_CONFIG } from "./infra/exit-codes.js";
 import { LoopLimitError, LoopSpinDetectedError } from "./infra/errors.js";
 import {
@@ -15,8 +15,7 @@ import {
   writeTranscript,
 } from "./infra/logger.js";
 import type { ChatProvider } from "./providers/base.js";
-import { AnthropicProvider } from "./providers/anthropic.js";
-import { MockProvider } from "./providers/mock.js";
+import { createProvider, parseProviderId } from "./providers/factory.js";
 import { createExecuteCommandTool } from "./tools/execute-command.js";
 import { createGlobSearchTool } from "./tools/glob-search.js";
 import { createReadFileTool } from "./tools/read-file.js";
@@ -92,7 +91,7 @@ async function main(): Promise<void> {
     .description("Learning-first code agent bootstrap")
     .option("-p, --prompt <text>", "single user prompt (omit for REPL)")
     .option("--config <path>", "path to config file (default: look for mini-agent.config.json or .mini-agent.json in cwd)")
-    .option("--provider <name>", "LLM provider: minimax | mock", "minimax")
+    .option("--provider <name>", "LLM provider: minimax | openai | deepseek | mock", "minimax")
     .option("--model <name>", "model name (overrides config/env)")
     .option("--stream", "stream model output token-by-token")
     .option("-t, --transcript-dir <path>", "transcript output directory")
@@ -161,28 +160,15 @@ async function main(): Promise<void> {
   }
 
   let provider: ChatProvider;
-  if (resolved.provider === "mock") {
-    provider = new MockProvider();
-  } else {
-    try {
-      const cfg = getMinimaxConfig(resolved);
-      const apiTools = registry.list().map((t) => ({
-        name: t.name,
-        description: t.description,
-        input_schema: t.inputSchema,
-      }));
-      provider = new AnthropicProvider({
-        ...cfg,
-        tools: apiTools,
-        maxRetries: resolved.policy.maxRetries,
-        retryDelayMs: resolved.policy.retryDelayMs,
-      });
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      process.stderr.write(`mini-agent config error: ${redactForLog(message)}\n`);
-      process.exitCode = EXIT_CONFIG;
-      return;
-    }
+  try {
+    const providerId = parseProviderId(resolved.provider);
+    provider = createProvider(providerId, resolved, registry.list());
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    process.stderr.write(`mini-agent provider error: ${redactForLog(message)}\n`);
+    process.stderr.write("Check the provider name, config file, and required env vars (e.g. OPENAI_API_KEY, DEEPSEEK_API_KEY, MINIMAX_API_KEY).\n");
+    process.exitCode = EXIT_CONFIG;
+    return;
   }
 
   const effectiveApproval =

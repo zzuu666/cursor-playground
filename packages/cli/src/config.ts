@@ -59,6 +59,13 @@ export interface MinimaxConfig {
   model: string;
 }
 
+/** OpenAI 兼容 API 的配置（OpenAI、DeepSeek 等）。 */
+export interface OpenAICompatibleConfig {
+  apiKey: string;
+  baseURL: string;
+  model: string;
+}
+
 export interface LoadConfigOptions {
   /** Explicit config file path (if set, only this path is used; must exist). */
   configPath?: string;
@@ -207,4 +214,41 @@ export function getMinimaxConfig(resolved?: Pick<ResolvedConfig, "baseURL" | "mo
 export function hasMinimaxApiKey(): boolean {
   ensureEnvLoaded();
   return Boolean(process.env.MINIMAX_API_KEY?.trim());
+}
+
+const OPENAI_DEFAULT_BASE_URL = "https://api.openai.com";
+const OPENAI_DEFAULT_MODEL = "gpt-4o-mini";
+const DEEPSEEK_DEFAULT_BASE_URL = "https://api.deepseek.com";
+const DEEPSEEK_DEFAULT_MODEL = "deepseek-chat";
+
+/**
+ * 获取 OpenAI 兼容 API 的配置（用于 provider openai 或 deepseek）。
+ * apiKey 来自对应 env；baseURL/model 优先 env，其次 resolved.model，最后默认值。
+ */
+export function getOpenAICompatibleConfig(
+  providerId: "openai" | "deepseek",
+  resolved: Pick<ResolvedConfig, "model">
+): OpenAICompatibleConfig {
+  ensureEnvLoaded();
+  if (providerId === "openai") {
+    const apiKey = process.env.OPENAI_API_KEY?.trim();
+    if (!apiKey) {
+      throw new Error(
+        "OPENAI_API_KEY is required for provider 'openai'. Set it in environment or in packages/cli/.env."
+      );
+    }
+    const baseURL = process.env.OPENAI_BASE_URL?.trim() || OPENAI_DEFAULT_BASE_URL;
+    const model = process.env.OPENAI_MODEL?.trim() || resolved.model || OPENAI_DEFAULT_MODEL;
+    return { apiKey, baseURL, model };
+  }
+  // deepseek
+  const apiKey = process.env.DEEPSEEK_API_KEY?.trim();
+  if (!apiKey) {
+    throw new Error(
+      "DEEPSEEK_API_KEY is required for provider 'deepseek'. Set it in environment or in packages/cli/.env."
+    );
+  }
+  const baseURL = process.env.DEEPSEEK_BASE_URL?.trim() || DEEPSEEK_DEFAULT_BASE_URL;
+  const model = process.env.DEEPSEEK_MODEL?.trim() || resolved.model || DEEPSEEK_DEFAULT_MODEL;
+  return { apiKey, baseURL, model };
 }

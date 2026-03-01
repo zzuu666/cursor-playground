@@ -60,8 +60,80 @@ src/
 |------|------|
 | 0 | 成功 |
 | 1 | 常规错误 |
-| 2 | 代理错误（配置无效等）|
+| 2 | 配置/环境错误（如缺少 API Key、Provider 无效）|
 | 3 | 工具错误 |
+
+## 配置说明
+
+CLI 支持多种 LLM 后端（Provider），通过**环境变量**和**配置文件**指定 API Key 与运行参数，**命令行参数**优先级最高。
+
+### 环境变量（按 Provider）
+
+| Provider | 必选环境变量 | 可选环境变量 | 默认 baseURL / model |
+|----------|--------------|--------------|------------------------|
+| minimax | `MINIMAX_API_KEY` | `MINIMAX_BASE_URL`, `MINIMAX_MODEL` | 见 config 默认值 |
+| openai | `OPENAI_API_KEY` | `OPENAI_BASE_URL`, `OPENAI_MODEL` | `https://api.openai.com` / `gpt-4o-mini` |
+| deepseek | `DEEPSEEK_API_KEY` | `DEEPSEEK_BASE_URL`, `DEEPSEEK_MODEL` | `https://api.deepseek.com` / `deepseek-chat` |
+| mock | 无 | — | 仅用于测试，无需 Key |
+
+配置 DeepSeek 时，在环境或 `packages/cli/.env` 中设置：
+
+```bash
+export DEEPSEEK_API_KEY="你的_DeepSeek_API_Key"
+```
+
+然后指定使用 deepseek：
+
+```bash
+pnpm exec tsx src/index.ts --provider deepseek --prompt "你好"
+# 或指定模型
+pnpm exec tsx src/index.ts --provider deepseek --model deepseek-reasoner --prompt "你好"
+```
+
+### 配置文件
+
+在工作目录或通过 `--config <path>` 指定路径，支持 `mini-agent.config.json` 或 `.mini-agent.json`。合并顺序：**默认值 → 配置文件 → 环境变量 → 命令行**。
+
+示例：
+
+```json
+{
+  "provider": "deepseek",
+  "model": "deepseek-chat",
+  "transcriptDir": "./transcripts",
+  "approval": "auto",
+  "policy": {
+    "maxTurns": 20,
+    "maxToolCalls": 10
+  }
+}
+```
+
+API Key 仍通过环境变量提供，配置文件中只写 `provider`、`model` 等运行参数。
+
+### 常用 CLI 参数
+
+| 参数 | 说明 | 示例 |
+|------|------|------|
+| `--provider <name>` | 使用的 LLM：`minimax` \| `openai` \| `deepseek` \| `mock` | `--provider deepseek` |
+| `--model <name>` | 模型名（覆盖配置/环境） | `--model deepseek-reasoner` |
+| `--prompt <text>` | 单次用户输入（省略则进入 REPL） | `--prompt "写一个 hello world"` |
+| `--config <path>` | 配置文件路径 | `--config ./my.config.json` |
+| `--approval <mode>` | 工具批准：`never` \| `auto` \| `prompt` | `--approval prompt` |
+| `--verbose` | 打印每轮请求/响应摘要 | `--verbose` |
+
+### 运行示例
+
+```bash
+# 使用 mock（无需 API Key）
+pnpm exec tsx src/index.ts --provider mock --prompt "hello"
+
+# 使用 DeepSeek（需设置 DEEPSEEK_API_KEY）
+pnpm exec tsx src/index.ts --provider deepseek --prompt "写一段 TypeScript 示例"
+
+# 使用 OpenAI（需设置 OPENAI_API_KEY）
+pnpm exec tsx src/index.ts --provider openai --model gpt-4o-mini --prompt "hello"
+```
 
 ## 使用方法
 

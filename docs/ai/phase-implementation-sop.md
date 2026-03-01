@@ -141,5 +141,6 @@
 | 4 | 同上 § Phase 4、[04-code-agent-commercial-plan.md](04-code-agent-commercial-plan.md) | [04-phase4-runbook.md](04-phase4-runbook.md) |
 | 5 | [04-code-agent-commercial-plan.md](04-code-agent-commercial-plan.md) § Phase 5 | [05-phase5-runbook.md](05-phase5-runbook.md) |
 | 6 | [04-code-agent-commercial-plan.md](04-code-agent-commercial-plan.md) § Phase 6、[plan-phase-6.md](plan-phase-6.md) | [06-phase6-runbook.md](06-phase6-runbook.md) |
+| 7 | [04-code-agent-commercial-plan.md](04-code-agent-commercial-plan.md) § Phase 7 | [07-phase7-runbook.md](07-phase7-runbook.md) |
 
 后续新增 Phase n 时，在总览方案中增加对应 Phase 小节，并新增 `0n-phaseN-runbook.md`（n 为 Phase 编号），保持本索引更新。

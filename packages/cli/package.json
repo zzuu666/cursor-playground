@@ -16,7 +16,8 @@
     "commander": "latest",
     "dotenv": "latest",
     "glob": "latest",
-    "zod": "latest"
+    "zod": "latest",
+    "openai": "latest"
   },
   "devDependencies": {
     "@types/node": "latest",
