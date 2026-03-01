@@ -6,12 +6,21 @@ import { AgentSession } from "./agent/session.js";
 import { getMinimaxConfig, loadConfig, type ResolvedConfig } from "./config.js";
 import { EXIT_BUSINESS, EXIT_CONFIG } from "./infra/exit-codes.js";
 import { LoopLimitError, LoopSpinDetectedError } from "./infra/errors.js";
-import { redactForLog, writeTranscript } from "./infra/logger.js";
+import {
+  appendErrorLog,
+  createSessionId,
+  clearSessionId,
+  redactForLog,
+  setSessionId,
+  writeTranscript,
+} from "./infra/logger.js";
 import type { ChatProvider } from "./providers/base.js";
 import { AnthropicProvider } from "./providers/anthropic.js";
 import { MockProvider } from "./providers/mock.js";
+import { createExecuteCommandTool } from "./tools/execute-command.js";
 import { createGlobSearchTool } from "./tools/glob-search.js";
 import { createReadFileTool } from "./tools/read-file.js";
+import { createWriteFileTool } from "./tools/write-file.js";
 import { ToolRegistry } from "./tools/registry.js";
 
 async function readFromStdin(): Promise<string> {
@@ -134,6 +143,14 @@ async function main(): Promise<void> {
   const workspaceCwd = process.cwd();
   registry.register(createReadFileTool(workspaceCwd));
   registry.register(createGlobSearchTool(workspaceCwd));
+  registry.register(createWriteFileTool(workspaceCwd));
+  registry.register(
+    createExecuteCommandTool({
+      cwd: workspaceCwd,
+      ...(resolved.allowedCommands != null && { allowedCommands: resolved.allowedCommands }),
+      timeoutMs: 60_000,
+    })
+  );
 
   const initialPrompt = await loadPrompt(opts.prompt);
 
@@ -176,6 +193,8 @@ async function main(): Promise<void> {
 
   const session = new AgentSession();
   const loop = new AgentLoop(provider, resolved.policy, registry);
+  const sessionId = createSessionId();
+  setSessionId(sessionId);
 
   if (initialPrompt != null) {
     const approvalRl =
@@ -195,6 +214,7 @@ async function main(): Promise<void> {
       }
       if (opts.stream) output.write("\n");
       const transcriptPath = await writeTranscript(resolved.transcriptDir, {
+        sessionId,
         createdAt: new Date().toISOString(),
         provider: provider.name,
         policy: resolved.policy,
@@ -208,24 +228,38 @@ async function main(): Promise<void> {
         ...(result.approvalLog.length > 0 && { approvalLog: result.approvalLog }),
       });
       output.write(
-        `turns=${result.turns}, toolCalls=${result.toolCalls}, elapsed=${result.elapsedTotalMs}ms\ntranscript=${transcriptPath}\n`
+        `sessionId=${sessionId} turns=${result.turns}, toolCalls=${result.toolCalls}, elapsed=${result.elapsedTotalMs}ms\ntranscript=${transcriptPath}\n`
       );
     } catch (err) {
       if (err instanceof LoopSpinDetectedError || err instanceof LoopLimitError) {
+        const meta = {
+          ...(err instanceof LoopSpinDetectedError && { spinDetected: true }),
+          error: { name: err.name, message: err.message },
+        };
         const transcriptPath = await writeTranscript(resolved.transcriptDir, {
+          sessionId,
           createdAt: new Date().toISOString(),
           provider: provider.name,
           policy: resolved.policy,
           messages: session.getMessages(),
-          ...(err instanceof LoopSpinDetectedError && { meta: { spinDetected: true } }),
+          meta,
+        });
+        await appendErrorLog(resolved.transcriptDir, {
+          sessionId,
+          timestamp: new Date().toISOString(),
+          name: err.name,
+          message: err.message,
+          transcriptPath,
         });
         process.stderr.write(
-          `error: ${err.message}\ntranscript=${transcriptPath}\n`
+          `error: ${err.message}\nsessionId=${sessionId} transcript=${transcriptPath}\n`
         );
       } else {
         throw err;
       }
       process.exitCode = EXIT_BUSINESS;
+    } finally {
+      clearSessionId();
     }
     return;
   }
@@ -259,32 +293,46 @@ async function main(): Promise<void> {
       }
       if (opts.stream) output.write("\n");
       output.write(
-        `[turns=${result.turns}, toolCalls=${result.toolCalls}, elapsed=${result.elapsedTotalMs}ms]\n`
+        `[sessionId=${sessionId} turns=${result.turns}, toolCalls=${result.toolCalls}, elapsed=${result.elapsedTotalMs}ms]\n`
       );
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       process.stderr.write(`error: ${msg}\n`);
-      if (err instanceof LoopSpinDetectedError) {
+      if (err instanceof LoopSpinDetectedError || err instanceof LoopLimitError) {
+        const meta = {
+          ...(err instanceof LoopSpinDetectedError && { spinDetected: true }),
+          error: err instanceof Error ? { name: err.name, message: err.message } : { name: "Error", message: String(err) },
+        };
         const transcriptPath = await writeTranscript(resolved.transcriptDir, {
+          sessionId,
           createdAt: new Date().toISOString(),
           provider: provider.name,
           policy: resolved.policy,
           messages: session.getMessages(),
-          meta: { spinDetected: true },
+          meta,
         });
-        process.stderr.write(`transcript=${transcriptPath}\n`);
+        await appendErrorLog(resolved.transcriptDir, {
+          sessionId,
+          timestamp: new Date().toISOString(),
+          name: err instanceof Error ? err.name : "Error",
+          message: err instanceof Error ? err.message : String(err),
+          transcriptPath,
+        });
+        process.stderr.write(`sessionId=${sessionId} transcript=${transcriptPath}\n`);
       }
       process.exitCode = EXIT_BUSINESS;
     }
   }
 
   const transcriptPath = await writeTranscript(resolved.transcriptDir, {
+    sessionId,
     createdAt: new Date().toISOString(),
     provider: provider.name,
     policy: resolved.policy,
     messages: session.getMessages(),
   });
-  output.write(`transcript=${transcriptPath}\n`);
+  output.write(`sessionId=${sessionId} transcript=${transcriptPath}\n`);
+  clearSessionId();
   rl.close();
 }
 

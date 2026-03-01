@@ -35,6 +35,8 @@ export interface ConfigFile {
   baseURL?: string;
   policy?: Partial<LoopPolicy>;
   approval?: ApprovalMode;
+  /** 允许 execute_command 执行的可执行名列表，如 ["npm","node"]；不设则用内置默认列表。 */
+  allowedCommands?: string[];
 }
 
 /** Resolved run config after merging defaults → config file → env → CLI. */
@@ -47,6 +49,8 @@ export interface ResolvedConfig {
   approval: ApprovalMode;
   verbose: boolean;
   dryRun: boolean;
+  /** 仅来自配置文件；不设则工具使用内置默认白名单。 */
+  allowedCommands?: string[];
 }
 
 export interface MinimaxConfig {
@@ -124,6 +128,10 @@ async function readConfigFile(filePath: string): Promise<ConfigFile> {
     if (typeof p.summaryThreshold === "number") config.policy.summaryThreshold = p.summaryThreshold;
     if (typeof p.summaryKeepRecent === "number") config.policy.summaryKeepRecent = p.summaryKeepRecent;
   }
+  if (Array.isArray(obj.allowedCommands)) {
+    const list = (obj.allowedCommands as unknown[]).filter((x): x is string => typeof x === "string");
+    if (list.length > 0) config.allowedCommands = list;
+  }
   return config;
 }
 
@@ -159,6 +167,7 @@ export async function loadConfig(options: LoadConfigOptions): Promise<ResolvedCo
     if (fileConfig.transcriptDir != null) merged.transcriptDir = fileConfig.transcriptDir;
     if (fileConfig.baseURL != null) merged.baseURL = fileConfig.baseURL;
     if (fileConfig.approval != null) merged.approval = fileConfig.approval;
+    if (fileConfig.allowedCommands != null) merged.allowedCommands = fileConfig.allowedCommands;
     merged.policy = mergePolicy(merged.policy, fileConfig.policy);
   }
 

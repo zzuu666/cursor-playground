@@ -38,14 +38,37 @@
 | 每轮与工具概况（verbose） | `pnpm exec tsx src/index.ts --provider mock --prompt "hello" --verbose` |
 | 仅解析 prompt 与工具（dry-run） | `pnpm exec tsx src/index.ts --prompt "读文件" --dry-run` |
 
+## 日志系统与 sessionId
+
+- **sessionId**：在创建 AgentSession 时生成唯一 UUID（如 `a1b2c3d4-e5f6-7890-abcd-ef1234567890`），用于关联整次 session 的 stderr、transcript 与 error 日志。单次 prompt 为 1 session；REPL 多轮共用同一 sessionId。
+- **stderr 前缀**：当次 session 内，`[tool]`、`[turn N]`、`[stream]` 等日志行会带 `[sessionId] ` 前缀，便于用 `grep sessionId` 过滤。
+- **结束输出**：成功时输出 `sessionId=xxx turns=... transcript=<path>`；错误时输出 `error: ... sessionId=xxx transcript=<path>`。
+
 ## 运行时日志（stderr）
 
 - **Phase 3 已有**：`[turn N] tools=K, elapsed=XXXms`、`[tool] name input: ...` 等。
+- **sessionId 前缀**：上述日志在当次 session 内带 `[<sessionId>] ` 前缀，例如 `[a1b2c3d4-e5f6-...] [tool] read_file input: {...}`。
 - **Phase 4 verbose 新增**：
   - 每轮请求前：`[verbose] turn N request: M messages`
   - 每轮响应后：`[verbose] turn N response: K blocks, text L chars`
   - 每个工具调用后：`[verbose] tool <name> inputLen=X resultLen=Y` 或 `inputLen=X error`
 - **dry-run**：`[dry-run] prompt: <prompt>`、`[dry-run] tools: tool1, tool2, ...`
+
+## Transcript 变更
+
+- **sessionId**：每条 transcript JSON 必含 `sessionId`，与 stderr 及 error 日志中的 sessionId 一致，便于用 ID 查找对应 transcript。
+- **错误记录（meta.error）**：若 run 因护栏/业务错误终止（如 maxTurns、maxToolCalls、空转检测），transcript 的 `meta` 中会包含 `error: { name, message }`，作为该次 run 的上下文快照，例如：
+  ```json
+  "meta": { "spinDetected": true, "error": { "name": "LoopSpinDetectedError", "message": "Same tool call repeated 3 times: read_file" } }
+  ```
+ 或 `"error": { "name": "LoopLimitError", "message": "maxTurns exceeded: 12" }`。
+
+## Error 独立日志
+
+- **路径**：`<transcriptDir>/errors.jsonl`（JSON Lines，一行一条记录）。
+- **写入时机**：仅在发生护栏/业务错误（如 LoopLimitError、LoopSpinDetectedError）并写入 transcript 之后追加一条，与 transcript 解耦。
+- **单条格式**：`{ "sessionId", "timestamp", "name", "message", "transcriptPath?" }`；`message` 会经脱敏后写入。
+- **用途**：便于运维单独 `tail -f` 或 `grep <sessionId>` 查看全局失败列表，再通过 `transcriptPath` 或 sessionId 关联到对应 transcript。
 
 ## 成功路径验证
 
@@ -77,4 +100,5 @@
 - 指定 `--config` 或工作目录下配置文件生效，且被 CLI 参数覆盖（见「成功路径验证」）。
 - `--verbose` 下能看到每轮摘要与工具调用概况（见「运行时日志」）。
 - 文档中明确退出码含义（见「退出码」），且上述成功/异常路径可复验。
+- **日志与 Transcript**：每次 session 有唯一 sessionId（UUID）；stderr 日志带 sessionId 前缀；transcript JSON 含 `sessionId`；因错误终止时 transcript 的 `meta.error` 含 `name` 与 `message`；同时会向 `transcriptDir/errors.jsonl` 追加一条独立 error 记录（含 sessionId、transcriptPath），便于全局查错。
 - 已有 Phase 的 runbook 示例命令（如 Phase 2、Phase 3）仍能按预期工作，无回归。

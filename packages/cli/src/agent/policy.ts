@@ -10,8 +10,8 @@ export interface LoopPolicy {
 }
 
 export const DEFAULT_LOOP_POLICY: LoopPolicy = {
-  maxTurns: 12,
-  maxToolCalls: 20,
+  maxTurns: 20,
+  maxToolCalls: 40,
   toolTimeoutMs: 15_000,
   maxRetries: 3,
   retryDelayMs: 1000,
