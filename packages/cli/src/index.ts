@@ -1,6 +1,8 @@
 import { createRequire } from "node:module";
+import { dirname, join } from "node:path";
 import { createInterface } from "node:readline";
 import { stdin as input, stdout as output } from "node:process";
+import { fileURLToPath } from "node:url";
 import { Command } from "commander";
 
 const require = createRequire(import.meta.url);
@@ -142,9 +144,11 @@ async function main(): Promise<void> {
     if (opts.transcriptDir != null) cliOverrides.transcriptDir = opts.transcriptDir;
     const cliSkillPaths = Array.isArray(opts.skill) ? opts.skill : typeof opts.skill === "string" ? [opts.skill] : [];
     if (cliSkillPaths.length > 0) cliOverrides.skillPaths = cliSkillPaths;
+    const cliPackageRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
     resolved = await loadConfig({
       ...(opts.config != null && { configPath: opts.config }),
       cwd: process.cwd(),
+      defaultTranscriptDir: join(cliPackageRoot, "transcripts"),
       cli: cliOverrides,
     });
   } catch (err) {

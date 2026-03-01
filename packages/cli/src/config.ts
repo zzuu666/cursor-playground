@@ -76,6 +76,8 @@ export interface LoadConfigOptions {
   /** Explicit config file path (if set, only this path is used; must exist). */
   configPath?: string;
   cwd: string;
+  /** 默认 transcript 输出目录；不设则用 join(cwd, "transcripts")。设为 CLI 包根下 transcripts 可避免从仓库根运行时写到根目录。 */
+  defaultTranscriptDir?: string;
   /** CLI overrides (highest priority). */
   cli?: Partial<
     Pick<ResolvedConfig, "provider" | "model" | "transcriptDir" | "approval" | "verbose" | "dryRun" | "skillPaths"> & {
@@ -157,13 +159,13 @@ async function readConfigFile(filePath: string): Promise<ConfigFile> {
  * When configPath is explicitly provided and file is missing/invalid, throws (caller should set exit 2).
  */
 export async function loadConfig(options: LoadConfigOptions): Promise<ResolvedConfig> {
-  const { configPath, cwd, cli = {} } = options;
+  const { configPath, cwd, defaultTranscriptDir, cli = {} } = options;
   ensureEnvLoaded();
 
   const defaults: ResolvedConfig = {
     provider: DEFAULT_PROVIDER,
     model: DEFAULT_MODEL,
-    transcriptDir: join(cwd, "transcripts"),
+    transcriptDir: defaultTranscriptDir ?? join(cwd, "transcripts"),
     baseURL: DEFAULT_BASE_URL,
     policy: { ...DEFAULT_LOOP_POLICY },
     approval: DEFAULT_APPROVAL,
