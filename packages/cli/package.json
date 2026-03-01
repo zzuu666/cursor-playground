@@ -3,6 +3,8 @@
   "version": "0.0.1",
   "private": true,
   "type": "module",
+  "files": ["dist", "README.md"],
+  "engines": { "node": ">=18" },
   "bin": {
     "mini-agent": "dist/index.js"
   },

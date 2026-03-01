@@ -1,6 +1,10 @@
+import { createRequire } from "node:module";
 import { createInterface } from "node:readline";
 import { stdin as input, stdout as output } from "node:process";
 import { Command } from "commander";
+
+const require = createRequire(import.meta.url);
+const pkg = require("../package.json") as { version: string };
 import { AgentLoop, type LoopResult } from "./agent/loop.js";
 import { AgentSession } from "./agent/session.js";
 import { loadConfig, type ResolvedConfig } from "./config.js";
@@ -88,7 +92,8 @@ async function main(): Promise<void> {
   const program = new Command();
   program
     .name("mini-agent")
-    .description("Learning-first code agent bootstrap")
+    .description("Code agent CLI: read, write, execute with approval flow")
+    .version(pkg.version, "-V, --version", "show version")
     .option("-p, --prompt <text>", "single user prompt (omit for REPL)")
     .option("--config <path>", "path to config file (default: look for mini-agent.config.json or .mini-agent.json in cwd)")
     .option("--provider <name>", "LLM provider: minimax | openai | deepseek | mock", "minimax")
@@ -97,7 +102,11 @@ async function main(): Promise<void> {
     .option("-t, --transcript-dir <path>", "transcript output directory")
     .option("--approval <mode>", "tool approval: never | auto | prompt", "auto")
     .option("--verbose", "print per-turn request/response summary and tool in/out lengths")
-    .option("--dry-run", "only print prompt and tool list, do not call LLM or tools");
+    .option("--dry-run", "only print prompt and tool list, do not call LLM or tools")
+    .addHelpText(
+      "after",
+      "\nExample:\n  mini-agent --provider mock --prompt \"hello\"\n  mini-agent --provider deepseek --approval prompt --prompt \"write a ts file\"\n"
+    );
 
   program.parse(process.argv);
   const opts = program.opts<{

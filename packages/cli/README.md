@@ -12,6 +12,11 @@
 - 🔍 **错误处理**：完善的错误分类和处理机制
 - ⚙️ **灵活配置**：支持自定义工具和模型提供商
 
+## 安装
+
+- **从 npm 安装（发布后）**：`pnpm add -g @mini-agent/cli` 或 `npx @mini-agent/cli --prompt "hello"`。
+- **从源码/本地安装**：在仓库根或 `packages/cli` 下执行 `pnpm build`，然后 `pnpm add -g ./packages/cli`（或 `pnpm add -g .` 在 packages/cli 下），运行 `mini-agent --version` 验证。
+
 ## 项目结构
 
 ```
@@ -59,9 +64,19 @@ src/
 | 代码 | 描述 |
 |------|------|
 | 0 | 成功 |
-| 1 | 常规错误 |
-| 2 | 配置/环境错误（如缺少 API Key、Provider 无效）|
-| 3 | 工具错误 |
+| 1 | 业务/护栏错误（如空转检测、轮次上限） |
+| 2 | 配置/环境错误（如缺少 API Key、Provider 无效） |
+
+## 安全与批准流
+
+- **`--approval`**：`never` 禁止需批准的工具；`auto` 自动通过；`prompt` 在每次需批准的工具执行前等待用户输入（y/n 或 n &lt;理由&gt;）。
+- **需批准的工具**：`write_file`、`execute_command` 等会写盘或执行命令的工具；仅当工具标记为需批准且策略为 `prompt` 时触发交互。
+- **拒绝后行为**：用户拒绝后，会向模型注入一条 `tool_result` 说明被拒绝，模型可继续推理或换方案。
+
+## Transcript
+
+- **输出目录**：由配置的 `transcriptDir` 或 `--transcript-dir` 指定，默认在工作目录下。
+- **文件内容**：每次会话会写入 JSON，包含 `sessionId`、`createdAt`、`provider`、`policy`、`messages`、`result`（轮次、工具调用、耗时等）；若发生批准/拒绝，会包含 `approvalLog`，便于审计与排查。
 
 ## 配置说明
 
@@ -231,7 +246,7 @@ npm run build
 npm run dev
 
 # 类型检查
-npm run check
+pnpm run typecheck
 ```
 
 ## 设计原则
