@@ -37,6 +37,8 @@ export interface LoopResult {
 
 export interface RunOptions {
   onStreamText?: (delta: string) => void;
+  /** When true, log per-turn request/response summary and tool in/out lengths. */
+  verbose?: boolean;
 }
 
 export class AgentLoop {
@@ -66,6 +68,7 @@ export class AgentLoop {
       options.onStreamText != null
         ? { onText: options.onStreamText }
         : {};
+    const verbose = options.verbose === true;
 
     while (turns < this.policy.maxTurns) {
       turns += 1;
@@ -75,12 +78,20 @@ export class AgentLoop {
       );
       const startTime = Date.now();
 
+      if (verbose) {
+        const msgCount = session.getMessages().length;
+        process.stderr.write(`[verbose] turn ${turns} request: ${msgCount} messages\n`);
+      }
       if (useStream) logStreamTurn(turns, "start");
       const blocks = useStream
         ? await this.provider.streamComplete!(session.getMessages(), streamCallbacks)
         : await this.provider.complete(session.getMessages());
       session.addAssistantBlocks(blocks);
       if (useStream) logStreamTurn(turns, "end");
+      if (verbose) {
+        const textLen = getTextFromBlocks(blocks).length;
+        process.stderr.write(`[verbose] turn ${turns} response: ${blocks.length} blocks, text ${textLen} chars\n`);
+      }
 
       const toolUseBlocks = blocks.filter(
         (block): block is ToolUseBlock => block.type === "tool_use"
@@ -123,19 +134,32 @@ export class AgentLoop {
           try {
             const content = await tool.execute(input);
             session.addToolResult(toolUse.id, content, false);
+            const resultBytes = Buffer.byteLength(content, "utf-8");
             logToolCall(toolUse.name, input, {
               ok: true,
-              bytes: Buffer.byteLength(content, "utf-8"),
+              bytes: resultBytes,
             });
+            if (verbose) {
+              const inputBytes = Buffer.byteLength(JSON.stringify(input), "utf-8");
+              process.stderr.write(`[verbose] tool ${toolUse.name} inputLen=${inputBytes} resultLen=${resultBytes}\n`);
+            }
           } catch (err) {
             const message = err instanceof Error ? err.message : String(err);
             session.addToolResult(toolUse.id, `Tool error: ${message}`, true);
             logToolCall(toolUse.name, input, { ok: false, error: message });
+            if (verbose) {
+              const inputBytes = Buffer.byteLength(JSON.stringify(input), "utf-8");
+              process.stderr.write(`[verbose] tool ${toolUse.name} inputLen=${inputBytes} error\n`);
+            }
           }
         } else {
           const errorMsg = `Unknown tool: ${toolUse.name}. Available: ${this.registry ? this.registry.list().map((t) => t.name).join(", ") : "none"}`;
           session.addToolResult(toolUse.id, errorMsg, true);
           logToolCall(toolUse.name, input, { ok: false, error: errorMsg });
+          if (verbose) {
+            const inputBytes = Buffer.byteLength(JSON.stringify(input), "utf-8");
+            process.stderr.write(`[verbose] tool ${toolUse.name} inputLen=${inputBytes} error\n`);
+          }
         }
         recentFingerprints.push(fingerprint);
         if (recentFingerprints.length > maxFingerprintHistory) {

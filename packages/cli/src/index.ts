@@ -1,12 +1,11 @@
 import { createInterface } from "node:readline";
 import { stdin as input, stdout as output } from "node:process";
-import { join } from "node:path";
 import { Command } from "commander";
 import { AgentLoop, type LoopResult } from "./agent/loop.js";
-import { DEFAULT_LOOP_POLICY } from "./agent/policy.js";
 import { AgentSession } from "./agent/session.js";
-import { getMinimaxConfig } from "./config.js";
-import { LoopSpinDetectedError } from "./infra/errors.js";
+import { getMinimaxConfig, loadConfig, type ResolvedConfig } from "./config.js";
+import { EXIT_BUSINESS, EXIT_CONFIG } from "./infra/exit-codes.js";
+import { LoopLimitError, LoopSpinDetectedError } from "./infra/errors.js";
 import { redactForLog, writeTranscript } from "./infra/logger.js";
 import type { ChatProvider } from "./providers/base.js";
 import { AnthropicProvider } from "./providers/anthropic.js";
@@ -38,13 +37,15 @@ function runOneTurn(
   loop: AgentLoop,
   session: AgentSession,
   prompt: string,
-  stream: boolean,
+  opts: { stream: boolean; verbose: boolean },
   provider: ChatProvider
 ): Promise<LoopResult> {
-  const runOptions =
-    stream && provider.streamComplete
-      ? { onStreamText: (delta: string) => output.write(delta) }
-      : {};
+  const runOptions: { onStreamText?: (delta: string) => void; verbose?: boolean } = {
+    verbose: opts.verbose,
+  };
+  if (opts.stream && provider.streamComplete) {
+    runOptions.onStreamText = (delta: string) => output.write(delta);
+  }
   return loop.run(session, prompt, runOptions);
 }
 
@@ -54,53 +55,87 @@ async function main(): Promise<void> {
     .name("mini-agent")
     .description("Learning-first code agent bootstrap")
     .option("-p, --prompt <text>", "single user prompt (omit for REPL)")
-    .option(
-      "--provider <name>",
-      "LLM provider: minimax | mock",
-      "minimax"
-    )
+    .option("--config <path>", "path to config file (default: look for mini-agent.config.json or .mini-agent.json in cwd)")
+    .option("--provider <name>", "LLM provider: minimax | mock", "minimax")
+    .option("--model <name>", "model name (overrides config/env)")
     .option("--stream", "stream model output token-by-token")
-    .option(
-      "-t, --transcript-dir <path>",
-      "transcript output directory",
-      join(process.cwd(), "transcripts")
-    );
+    .option("-t, --transcript-dir <path>", "transcript output directory")
+    .option("--verbose", "print per-turn request/response summary and tool in/out lengths")
+    .option("--dry-run", "only print prompt and tool list, do not call LLM or tools");
 
   program.parse(process.argv);
-  const options = program.opts<{
+  const opts = program.opts<{
     prompt?: string;
+    config?: string;
     provider: string;
+    model?: string;
     stream: boolean;
-    transcriptDir: string;
+    transcriptDir?: string;
+    verbose: boolean;
+    dryRun: boolean;
   }>();
+
+  let resolved: ResolvedConfig;
+  try {
+    const cliOverrides: Parameters<typeof loadConfig>[0]["cli"] = {
+      provider: opts.provider,
+      verbose: opts.verbose ?? false,
+      dryRun: opts.dryRun ?? false,
+    };
+    if (opts.model != null) cliOverrides.model = opts.model;
+    if (opts.transcriptDir != null) cliOverrides.transcriptDir = opts.transcriptDir;
+    resolved = await loadConfig({
+      ...(opts.config != null && { configPath: opts.config }),
+      cwd: process.cwd(),
+      cli: cliOverrides,
+    });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    process.stderr.write(`mini-agent config error: ${redactForLog(message)}\n`);
+    process.exitCode = EXIT_CONFIG;
+    return;
+  }
 
   const registry = new ToolRegistry();
   const workspaceCwd = process.cwd();
   registry.register(createReadFileTool(workspaceCwd));
   registry.register(createGlobSearchTool(workspaceCwd));
 
-  const provider: ChatProvider =
-    options.provider === "mock"
-      ? new MockProvider()
-      : (() => {
-          const cfg = getMinimaxConfig();
-          const apiTools = registry.list().map((t) => ({
-            name: t.name,
-            description: t.description,
-            input_schema: t.inputSchema,
-          }));
-          return new AnthropicProvider({
-            ...cfg,
-            tools: apiTools,
-            maxRetries: DEFAULT_LOOP_POLICY.maxRetries,
-            retryDelayMs: DEFAULT_LOOP_POLICY.retryDelayMs,
-          });
-        })();
+  const initialPrompt = await loadPrompt(opts.prompt);
+
+  if (resolved.dryRun) {
+    process.stderr.write(`[dry-run] prompt: ${initialPrompt ?? "(none)"}\n`);
+    process.stderr.write(`[dry-run] tools: ${registry.list().map((t) => t.name).join(", ") || "none"}\n`);
+    return;
+  }
+
+  let provider: ChatProvider;
+  if (resolved.provider === "mock") {
+    provider = new MockProvider();
+  } else {
+    try {
+      const cfg = getMinimaxConfig(resolved);
+      const apiTools = registry.list().map((t) => ({
+        name: t.name,
+        description: t.description,
+        input_schema: t.inputSchema,
+      }));
+      provider = new AnthropicProvider({
+        ...cfg,
+        tools: apiTools,
+        maxRetries: resolved.policy.maxRetries,
+        retryDelayMs: resolved.policy.retryDelayMs,
+      });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      process.stderr.write(`mini-agent config error: ${redactForLog(message)}\n`);
+      process.exitCode = EXIT_CONFIG;
+      return;
+    }
+  }
 
   const session = new AgentSession();
-  const loop = new AgentLoop(provider, DEFAULT_LOOP_POLICY, registry);
-
-  const initialPrompt = await loadPrompt(options.prompt);
+  const loop = new AgentLoop(provider, resolved.policy, registry);
 
   if (initialPrompt != null) {
     try {
@@ -108,17 +143,17 @@ async function main(): Promise<void> {
         loop,
         session,
         initialPrompt,
-        options.stream ?? false,
+        { stream: opts.stream ?? false, verbose: resolved.verbose },
         provider
       );
-      if (!options.stream && result.finalText) {
+      if (!opts.stream && result.finalText) {
         output.write(`${result.finalText}\n`);
       }
-      if (options.stream) output.write("\n");
-      const transcriptPath = await writeTranscript(options.transcriptDir, {
+      if (opts.stream) output.write("\n");
+      const transcriptPath = await writeTranscript(resolved.transcriptDir, {
         createdAt: new Date().toISOString(),
         provider: provider.name,
-        policy: DEFAULT_LOOP_POLICY,
+        policy: resolved.policy,
         messages: session.getMessages(),
         result: {
           turns: result.turns,
@@ -131,13 +166,13 @@ async function main(): Promise<void> {
         `turns=${result.turns}, toolCalls=${result.toolCalls}, elapsed=${result.elapsedTotalMs}ms\ntranscript=${transcriptPath}\n`
       );
     } catch (err) {
-      if (err instanceof LoopSpinDetectedError) {
-        const transcriptPath = await writeTranscript(options.transcriptDir, {
+      if (err instanceof LoopSpinDetectedError || err instanceof LoopLimitError) {
+        const transcriptPath = await writeTranscript(resolved.transcriptDir, {
           createdAt: new Date().toISOString(),
           provider: provider.name,
-          policy: DEFAULT_LOOP_POLICY,
+          policy: resolved.policy,
           messages: session.getMessages(),
-          meta: { spinDetected: true },
+          ...(err instanceof LoopSpinDetectedError && { meta: { spinDetected: true } }),
         });
         process.stderr.write(
           `error: ${err.message}\ntranscript=${transcriptPath}\n`
@@ -145,14 +180,14 @@ async function main(): Promise<void> {
       } else {
         throw err;
       }
-      process.exitCode = 1;
+      process.exitCode = EXIT_BUSINESS;
     }
     return;
   }
 
   if (!input.isTTY) {
     process.stderr.write("mini-agent failed: Please pass --prompt or run in TTY for REPL.\n");
-    process.exitCode = 1;
+    process.exitCode = EXIT_BUSINESS;
     return;
   }
 
@@ -170,13 +205,13 @@ async function main(): Promise<void> {
         loop,
         session,
         prompt,
-        options.stream ?? false,
+        { stream: opts.stream ?? false, verbose: resolved.verbose },
         provider
       );
-      if (!options.stream && result.finalText) {
+      if (!opts.stream && result.finalText) {
         output.write(`${result.finalText}\n`);
       }
-      if (options.stream) output.write("\n");
+      if (opts.stream) output.write("\n");
       output.write(
         `[turns=${result.turns}, toolCalls=${result.toolCalls}, elapsed=${result.elapsedTotalMs}ms]\n`
       );
@@ -184,22 +219,23 @@ async function main(): Promise<void> {
       const msg = err instanceof Error ? err.message : String(err);
       process.stderr.write(`error: ${msg}\n`);
       if (err instanceof LoopSpinDetectedError) {
-        const transcriptPath = await writeTranscript(options.transcriptDir, {
+        const transcriptPath = await writeTranscript(resolved.transcriptDir, {
           createdAt: new Date().toISOString(),
           provider: provider.name,
-          policy: DEFAULT_LOOP_POLICY,
+          policy: resolved.policy,
           messages: session.getMessages(),
           meta: { spinDetected: true },
         });
         process.stderr.write(`transcript=${transcriptPath}\n`);
       }
+      process.exitCode = EXIT_BUSINESS;
     }
   }
 
-  const transcriptPath = await writeTranscript(options.transcriptDir, {
+  const transcriptPath = await writeTranscript(resolved.transcriptDir, {
     createdAt: new Date().toISOString(),
     provider: provider.name,
-    policy: DEFAULT_LOOP_POLICY,
+    policy: resolved.policy,
     messages: session.getMessages(),
   });
   output.write(`transcript=${transcriptPath}\n`);
@@ -210,5 +246,5 @@ main().catch((error: unknown) => {
   const message =
     error instanceof Error ? error.message : "Unknown error during startup.";
   process.stderr.write(`mini-agent failed: ${redactForLog(message)}\n`);
-  process.exitCode = 1;
+  process.exitCode = EXIT_BUSINESS;
 });

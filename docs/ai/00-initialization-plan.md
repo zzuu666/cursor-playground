@@ -204,6 +204,25 @@ mini-agent/
 
 ---
 
+## Phase 4 — 配置与可观测性（商用基础）
+
+**目标：** 从「写死/环境变量」升级为「可配置、可观测」，为后续批准流和工具扩展打基础。
+
+1. 支持配置文件 `mini-agent.config.json` / `.mini-agent.json` 或 `--config <path>`，包含 provider、model、transcriptDir、policy 等；CLI 参数覆盖配置文件。
+2. 统一配置加载（[config.ts](packages/cli/src/config.ts)）：合并顺序为 **默认值 → 配置文件 → 环境变量 → CLI 选项**。
+3. 可观测性：`--verbose` 打印每轮请求/响应摘要与工具入参/结果长度；`--dry-run` 仅解析 prompt 与工具列表，不调用 LLM/工具。
+4. 规范退出码：0 成功、1 业务/护栏错误、2 配置/环境错误；在 Runbook 中明确说明。
+
+**验收（DoD）：**
+
+- 指定 `--config` 或工作目录下配置文件生效，且被 CLI 参数覆盖。
+- `--verbose` 下能看到每轮摘要与工具调用概况。
+- 文档中明确退出码含义，且 DoD 可复验。
+
+详细方案见 [04-code-agent-commercial-plan.md](04-code-agent-commercial-plan.md)；运行与验证见 [04-phase4-runbook.md](04-phase4-runbook.md)。
+
+---
+
 ## 7. 与“可用型 Agent”的边界
 
 当前方案是学习最优路径，不是生产最优路径。以下能力明确后置：
@@ -234,6 +253,7 @@ mini-agent/
 | Phase 1 | LLM API 协议、streaming、多轮上下文管理 |
 | Phase 2 | tool_use/tool_result 机制、Agent Loop 核心实现 |
 | Phase 3 | 稳定性治理、可观测性、会话复盘方法 |
+| Phase 4 | 配置分层、CLI 与配置优先级、可观测性与退出码规范 |
 
 ---
 

@@ -1,16 +1,55 @@
 import { config as loadDotenv } from "dotenv";
+import { readFile } from "node:fs/promises";
+import { existsSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import type { LoopPolicy } from "./agent/policy.js";
+import { DEFAULT_LOOP_POLICY } from "./agent/policy.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
 const DEFAULT_BASE_URL = "https://api.minimax.io/anthropic";
 const DEFAULT_MODEL = "MiniMax-M2.5";
+const DEFAULT_PROVIDER = "minimax";
+
+const CONFIG_FILE_NAMES = ["mini-agent.config.json", ".mini-agent.json"] as const;
+
+/** Config file schema (all optional). */
+export interface ConfigFile {
+  provider?: string;
+  model?: string;
+  transcriptDir?: string;
+  baseURL?: string;
+  policy?: Partial<LoopPolicy>;
+}
+
+/** Resolved run config after merging defaults → config file → env → CLI. */
+export interface ResolvedConfig {
+  provider: string;
+  model: string;
+  transcriptDir: string;
+  baseURL: string;
+  policy: LoopPolicy;
+  verbose: boolean;
+  dryRun: boolean;
+}
 
 export interface MinimaxConfig {
   apiKey: string;
   baseURL: string;
   model: string;
+}
+
+export interface LoadConfigOptions {
+  /** Explicit config file path (if set, only this path is used; must exist). */
+  configPath?: string;
+  cwd: string;
+  /** CLI overrides (highest priority). */
+  cli?: Partial<
+    Pick<ResolvedConfig, "provider" | "model" | "transcriptDir" | "verbose" | "dryRun"> & {
+      policy?: Partial<LoopPolicy>;
+    }
+  >;
 }
 
 let loaded = false;
@@ -21,7 +60,107 @@ function ensureEnvLoaded(): void {
   }
 }
 
-export function getMinimaxConfig(): MinimaxConfig {
+function mergePolicy(base: LoopPolicy, overrides: Partial<LoopPolicy> | undefined): LoopPolicy {
+  if (!overrides || Object.keys(overrides).length === 0) return base;
+  return { ...base, ...overrides };
+}
+
+/**
+ * Find config file path: either explicit path or first existing in cwd.
+ * Returns undefined if no explicit path and no file found.
+ */
+function resolveConfigPath(configPath: string | undefined, cwd: string): string | undefined {
+  if (configPath != null && configPath.trim() !== "") {
+    return configPath;
+  }
+  for (const name of CONFIG_FILE_NAMES) {
+    const p = join(cwd, name);
+    if (existsSync(p)) return p;
+  }
+  return undefined;
+}
+
+/**
+ * Load and parse config file. Throws on read or parse error.
+ */
+async function readConfigFile(filePath: string): Promise<ConfigFile> {
+  const raw = await readFile(filePath, "utf-8");
+  const parsed = JSON.parse(raw) as unknown;
+  if (typeof parsed !== "object" || parsed === null) {
+    throw new Error("Config file must export a JSON object.");
+  }
+  const obj = parsed as Record<string, unknown>;
+  const config: ConfigFile = {};
+  if (typeof obj.provider === "string") config.provider = obj.provider;
+  if (typeof obj.model === "string") config.model = obj.model;
+  if (typeof obj.transcriptDir === "string") config.transcriptDir = obj.transcriptDir;
+  if (typeof obj.baseURL === "string") config.baseURL = obj.baseURL;
+  if (typeof obj.policy === "object" && obj.policy !== null) {
+    const p = obj.policy as Record<string, unknown>;
+    config.policy = {};
+    if (typeof p.maxTurns === "number") config.policy.maxTurns = p.maxTurns;
+    if (typeof p.maxToolCalls === "number") config.policy.maxToolCalls = p.maxToolCalls;
+    if (typeof p.toolTimeoutMs === "number") config.policy.toolTimeoutMs = p.toolTimeoutMs;
+    if (typeof p.maxRetries === "number") config.policy.maxRetries = p.maxRetries;
+    if (typeof p.retryDelayMs === "number") config.policy.retryDelayMs = p.retryDelayMs;
+    if (typeof p.maxSameToolRepeat === "number") config.policy.maxSameToolRepeat = p.maxSameToolRepeat;
+    if (typeof p.summaryThreshold === "number") config.policy.summaryThreshold = p.summaryThreshold;
+    if (typeof p.summaryKeepRecent === "number") config.policy.summaryKeepRecent = p.summaryKeepRecent;
+  }
+  return config;
+}
+
+/**
+ * Load config with merge order: defaults → config file → env → CLI.
+ * When configPath is explicitly provided and file is missing/invalid, throws (caller should set exit 2).
+ */
+export async function loadConfig(options: LoadConfigOptions): Promise<ResolvedConfig> {
+  const { configPath, cwd, cli = {} } = options;
+  ensureEnvLoaded();
+
+  const defaults: ResolvedConfig = {
+    provider: DEFAULT_PROVIDER,
+    model: DEFAULT_MODEL,
+    transcriptDir: join(cwd, "transcripts"),
+    baseURL: DEFAULT_BASE_URL,
+    policy: { ...DEFAULT_LOOP_POLICY },
+    verbose: false,
+    dryRun: false,
+  };
+
+  let merged: ResolvedConfig = { ...defaults, policy: { ...defaults.policy } };
+
+  const filePath = resolveConfigPath(configPath, cwd);
+  if (filePath !== undefined) {
+    if (!existsSync(filePath)) {
+      throw new Error(`Config file not found: ${filePath}`);
+    }
+    const fileConfig = await readConfigFile(filePath);
+    if (fileConfig.provider != null) merged.provider = fileConfig.provider;
+    if (fileConfig.model != null) merged.model = fileConfig.model;
+    if (fileConfig.transcriptDir != null) merged.transcriptDir = fileConfig.transcriptDir;
+    if (fileConfig.baseURL != null) merged.baseURL = fileConfig.baseURL;
+    merged.policy = mergePolicy(merged.policy, fileConfig.policy);
+  }
+
+  const envBaseURL = process.env.MINIMAX_BASE_URL?.trim();
+  const envModel = process.env.MINIMAX_MODEL?.trim();
+  const envTranscriptDir = process.env.TRANSCRIPT_DIR?.trim();
+  if (envBaseURL) merged.baseURL = envBaseURL;
+  if (envModel) merged.model = envModel;
+  if (envTranscriptDir) merged.transcriptDir = envTranscriptDir;
+
+  if (cli.provider != null) merged.provider = cli.provider;
+  if (cli.model != null) merged.model = cli.model;
+  if (cli.transcriptDir != null) merged.transcriptDir = cli.transcriptDir;
+  if (cli.verbose != null) merged.verbose = cli.verbose;
+  if (cli.dryRun != null) merged.dryRun = cli.dryRun;
+  if (cli.policy != null) merged.policy = mergePolicy(merged.policy, cli.policy);
+
+  return merged;
+}
+
+export function getMinimaxConfig(resolved?: Pick<ResolvedConfig, "baseURL" | "model">): MinimaxConfig {
   ensureEnvLoaded();
   const apiKey = process.env.MINIMAX_API_KEY?.trim();
   if (!apiKey) {
@@ -31,8 +170,8 @@ export function getMinimaxConfig(): MinimaxConfig {
   }
   return {
     apiKey,
-    baseURL: process.env.MINIMAX_BASE_URL?.trim() ?? DEFAULT_BASE_URL,
-    model: process.env.MINIMAX_MODEL?.trim() ?? DEFAULT_MODEL,
+    baseURL: resolved?.baseURL ?? process.env.MINIMAX_BASE_URL?.trim() ?? DEFAULT_BASE_URL,
+    model: resolved?.model ?? process.env.MINIMAX_MODEL?.trim() ?? DEFAULT_MODEL,
   };
 }
 
