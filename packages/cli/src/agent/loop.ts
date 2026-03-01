@@ -18,21 +18,38 @@ export interface LoopResult {
   toolCalls: number;
 }
 
+export interface RunOptions {
+  onStreamText?: (delta: string) => void;
+}
+
 export class AgentLoop {
   constructor(
     private readonly provider: ChatProvider,
     private readonly policy: LoopPolicy = DEFAULT_LOOP_POLICY
   ) {}
 
-  async run(session: AgentSession, userInput: string): Promise<LoopResult> {
+  async run(
+    session: AgentSession,
+    userInput: string,
+    options: RunOptions = {}
+  ): Promise<LoopResult> {
     session.addUserText(userInput);
 
     let turns = 0;
     let toolCalls = 0;
 
+    const useStream =
+      options.onStreamText != null && this.provider.streamComplete != null;
+    const streamCallbacks =
+      options.onStreamText != null
+        ? { onText: options.onStreamText }
+        : {};
+
     while (turns < this.policy.maxTurns) {
       turns += 1;
-      const blocks = await this.provider.complete(session.getMessages());
+      const blocks = useStream
+        ? await this.provider.streamComplete!(session.getMessages(), streamCallbacks)
+        : await this.provider.complete(session.getMessages());
       session.addAssistantBlocks(blocks);
 
       const toolUseBlocks = blocks.filter((block) => block.type === "tool_use");

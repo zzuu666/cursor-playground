@@ -152,15 +152,18 @@ mini-agent/
 **目标：** 验证 Provider、流式输出、会话历史。
 
 1. 接入 MiniMax（Anthropic SDK + baseURL）
-2. 实现单轮与多轮对话
-3. 实现 stream 输出
+2. 实现单轮与多轮对话（含 REPL）
+3. 实现 stream 输出（`--stream`）
 4. 保存完整 assistant content blocks
+5. API Key 安全：`.env` + 环境变量，transcript/日志脱敏
 
 **验收（DoD）：**
 
-- 连续 5 轮问答上下文不丢失
+- 连续多轮问答上下文不丢失（REPL 模式）
 - stream 中断时能返回可读错误
-- transcript 可回放每一轮请求/响应摘要
+- transcript 可回放每一轮请求/响应摘要，且不含明文 key
+
+**运行与验证：** 见 [01-phase1-runbook.md](01-phase1-runbook.md)；自动化验收执行 `./scripts/phase1-verify.sh`。
 
 ---
 
