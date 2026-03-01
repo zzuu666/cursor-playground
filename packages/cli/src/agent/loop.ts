@@ -1,5 +1,7 @@
 import { LoopLimitError } from "../infra/errors.js";
+import { logStreamTurn, logToolCall } from "../infra/logger.js";
 import type { ChatProvider } from "../providers/base.js";
+import type { ToolRegistry } from "../tools/registry.js";
 import { DEFAULT_LOOP_POLICY, type LoopPolicy } from "./policy.js";
 import type { AssistantContentBlock } from "./session.js";
 import { AgentSession } from "./session.js";
@@ -25,7 +27,8 @@ export interface RunOptions {
 export class AgentLoop {
   constructor(
     private readonly provider: ChatProvider,
-    private readonly policy: LoopPolicy = DEFAULT_LOOP_POLICY
+    private readonly policy: LoopPolicy = DEFAULT_LOOP_POLICY,
+    private readonly registry?: ToolRegistry
   ) {}
 
   async run(
@@ -47,10 +50,12 @@ export class AgentLoop {
 
     while (turns < this.policy.maxTurns) {
       turns += 1;
+      if (useStream) logStreamTurn(turns, "start");
       const blocks = useStream
         ? await this.provider.streamComplete!(session.getMessages(), streamCallbacks)
         : await this.provider.complete(session.getMessages());
       session.addAssistantBlocks(blocks);
+      if (useStream) logStreamTurn(turns, "end");
 
       const toolUseBlocks = blocks.filter((block) => block.type === "tool_use");
       if (toolUseBlocks.length === 0) {
@@ -69,11 +74,26 @@ export class AgentLoop {
           );
         }
 
-        session.addToolResult(
-          toolUse.id,
-          "Phase 0 does not execute tools yet. Implement tool registry in Phase 2.",
-          true
-        );
+        const tool = this.registry?.get(toolUse.name);
+        const input = toolUse.input as Record<string, unknown>;
+        if (tool) {
+          try {
+            const content = await tool.execute(input);
+            session.addToolResult(toolUse.id, content, false);
+            logToolCall(toolUse.name, input, {
+              ok: true,
+              bytes: Buffer.byteLength(content, "utf-8"),
+            });
+          } catch (err) {
+            const message = err instanceof Error ? err.message : String(err);
+            session.addToolResult(toolUse.id, `Tool error: ${message}`, true);
+            logToolCall(toolUse.name, input, { ok: false, error: message });
+          }
+        } else {
+          const errorMsg = `Unknown tool: ${toolUse.name}. Available: ${this.registry ? this.registry.list().map((t) => t.name).join(", ") : "none"}`;
+          session.addToolResult(toolUse.id, errorMsg, true);
+          logToolCall(toolUse.name, input, { ok: false, error: errorMsg });
+        }
       }
     }
 

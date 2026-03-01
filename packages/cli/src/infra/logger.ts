@@ -71,3 +71,34 @@ export function redactForLog(text: string): string {
     REDACT_PLACEHOLDER
   );
 }
+
+const MAX_LOG_SNIPPET = 200;
+
+function truncate(str: string, max: number): string {
+  if (str.length <= max) return str;
+  return str.slice(0, max) + "...";
+}
+
+export type ToolCallOutcome =
+  | { ok: true; bytes: number }
+  | { ok: false; error: string };
+
+export function logToolCall(
+  name: string,
+  input: unknown,
+  outcome: ToolCallOutcome
+): void {
+  const safeInput = redactObject(input as Record<string, unknown>);
+  const inputStr = truncate(JSON.stringify(safeInput), MAX_LOG_SNIPPET);
+  process.stderr.write(`[tool] ${name} input: ${inputStr}\n`);
+  if (outcome.ok) {
+    process.stderr.write(`[tool] ${name} ok ${outcome.bytes} bytes\n`);
+  } else {
+    const errStr = truncate(redactForLog(outcome.error), MAX_LOG_SNIPPET);
+    process.stderr.write(`[tool] ${name} error: ${errStr}\n`);
+  }
+}
+
+export function logStreamTurn(turn: number, phase: "start" | "end"): void {
+  process.stderr.write(`[stream] turn ${turn} ${phase}\n`);
+}

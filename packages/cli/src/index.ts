@@ -10,6 +10,9 @@ import { redactForLog, writeTranscript } from "./infra/logger.js";
 import type { ChatProvider } from "./providers/base.js";
 import { AnthropicProvider } from "./providers/anthropic.js";
 import { MockProvider } from "./providers/mock.js";
+import { createGlobSearchTool } from "./tools/glob-search.js";
+import { createReadFileTool } from "./tools/read-file.js";
+import { ToolRegistry } from "./tools/registry.js";
 
 async function readFromStdin(): Promise<string> {
   const chunks: Buffer[] = [];
@@ -70,16 +73,26 @@ async function main(): Promise<void> {
     transcriptDir: string;
   }>();
 
+  const registry = new ToolRegistry();
+  const workspaceCwd = process.cwd();
+  registry.register(createReadFileTool(workspaceCwd));
+  registry.register(createGlobSearchTool(workspaceCwd));
+
   const provider: ChatProvider =
     options.provider === "mock"
       ? new MockProvider()
       : (() => {
           const cfg = getMinimaxConfig();
-          return new AnthropicProvider(cfg);
+          const apiTools = registry.list().map((t) => ({
+            name: t.name,
+            description: t.description,
+            input_schema: t.inputSchema,
+          }));
+          return new AnthropicProvider({ ...cfg, tools: apiTools });
         })();
 
   const session = new AgentSession();
-  const loop = new AgentLoop(provider, DEFAULT_LOOP_POLICY);
+  const loop = new AgentLoop(provider, DEFAULT_LOOP_POLICY, registry);
 
   const initialPrompt = await loadPrompt(options.prompt);
 

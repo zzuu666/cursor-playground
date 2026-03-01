@@ -171,19 +171,19 @@ mini-agent/
 
 **目标：** 跑通真实 Agent Loop，理解 tool_use/tool_result 协议。
 
-1. 实现 Tool 抽象与 Registry
-2. 接入 `read-file`
-3. 接入 `glob-search`
-4. 在 Loop 中处理 `tool_use -> execute -> tool_result -> continue`
-5. 加入基础安全约束（学习版最小边界）：
-   - 仅允许工作目录内路径
-   - 工具输出长度上限（例如 8KB）
+1. 实现 Tool 抽象与 Registry（[tools/types.ts](packages/cli/src/tools/types.ts)、[registry.ts](packages/cli/src/tools/registry.ts)）
+2. 接入 `read_file`（[read-file.ts](packages/cli/src/tools/read-file.ts)）
+3. 接入 `glob_search`（[glob-search.ts](packages/cli/src/tools/glob-search.ts)）
+4. 在 Loop 中处理 `tool_use -> execute -> tool_result -> continue`；Provider 请求中传入 tools（[loop.ts](packages/cli/src/agent/loop.ts)、[anthropic.ts](packages/cli/src/providers/anthropic.ts)）
+5. 安全约束：工作目录内路径（[safe-path.ts](packages/cli/src/tools/safe-path.ts)）、输出 8KB 上限
 
 **验收（DoD）：**
 
 - 给出“读取某文件并总结”任务可自主完成
 - 给出“搜索某类文件并汇总”任务可自主完成
 - 工具失败（文件不存在/超时）可被模型消费并继续推进
+
+**运行与原理：** 见 [02-phase2-runbook.md](02-phase2-runbook.md)。
 
 ---
 
