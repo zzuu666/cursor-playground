@@ -141,9 +141,14 @@ export class AgentLoop {
 
         const input = toolUse.input as Record<string, unknown>;
         const fingerprint = toolCallFingerprint(toolUse.name, input);
-        const sameCount =
-          recentFingerprints.filter((f) => f === fingerprint).length;
-        if (sameCount >= this.policy.maxSameToolRepeat - 1) {
+        // Only treat as spin when the same (tool, input) is repeated *consecutively*
+        const recent = recentFingerprints.slice(
+          -(this.policy.maxSameToolRepeat - 1)
+        );
+        const consecutiveSame =
+          recent.length >= this.policy.maxSameToolRepeat - 1 &&
+          recent.every((f) => f === fingerprint);
+        if (consecutiveSame) {
           throw new LoopSpinDetectedError(
             `Same tool call repeated ${this.policy.maxSameToolRepeat} times: ${toolUse.name}`,
             toolUse.name,

@@ -141,6 +141,9 @@ export async function writeTranscript(
   await mkdir(dir, { recursive: true });
 
   const safe = redactObject(payload) as TranscriptPayload;
+  // Keep sessionId and provider as-is for correlation and debugging (do not redact)
+  safe.sessionId = payload.sessionId;
+  safe.provider = payload.provider;
   const fileName = `${new Date().toISOString().replace(/[:.]/g, "-")}.json`;
   const filePath = join(dir, fileName);
   await writeFile(filePath, `${JSON.stringify(safe, null, 2)}\n`, "utf-8");
