@@ -44,6 +44,8 @@ export interface ConfigFile {
   globalSkillDirs?: string[];
   /** 是否跳过加载全局 Skills。 */
   skipGlobalSkills?: boolean;
+  /** 插件目录路径列表（Claude Code 式，含 .claude-plugin/plugin.json）；配置先，CLI 追加。 */
+  pluginDirs?: string[];
 }
 
 /** Resolved run config after merging defaults → config file → env → CLI. */
@@ -66,6 +68,8 @@ export interface ResolvedConfig {
   globalSkillDirs?: string[];
   /** 是否跳过加载全局 Skills。 */
   skipGlobalSkills?: boolean;
+  /** 合并后的插件目录列表（配置 + CLI 追加）。 */
+  pluginDirs?: string[];
 }
 
 export interface MinimaxConfig {
@@ -89,7 +93,7 @@ export interface LoadConfigOptions {
   defaultTranscriptDir?: string;
   /** CLI overrides (highest priority). */
   cli?: Partial<
-    Pick<ResolvedConfig, "provider" | "model" | "transcriptDir" | "approval" | "verbose" | "dryRun" | "skillPaths"> & {
+    Pick<ResolvedConfig, "provider" | "model" | "transcriptDir" | "approval" | "verbose" | "dryRun" | "skillPaths" | "pluginDirs"> & {
       policy?: Partial<LoopPolicy>;
     }
   >;
@@ -179,6 +183,10 @@ async function readConfigFile(filePath: string): Promise<ConfigFile> {
     if (list.length > 0) config.globalSkillDirs = list;
   }
   if (typeof obj.skipGlobalSkills === "boolean") config.skipGlobalSkills = obj.skipGlobalSkills;
+  if (Array.isArray(obj.pluginDirs)) {
+    const list = (obj.pluginDirs as unknown[]).filter((x): x is string => typeof x === "string");
+    if (list.length > 0) config.pluginDirs = list;
+  }
   return config;
 }
 
@@ -221,6 +229,7 @@ export async function loadConfig(options: LoadConfigOptions): Promise<ResolvedCo
     if (fileConfig.globalSkillDirs != null)
       merged.globalSkillDirs = fileConfig.globalSkillDirs.map(resolveTilde);
     if (fileConfig.skipGlobalSkills != null) merged.skipGlobalSkills = fileConfig.skipGlobalSkills;
+    if (fileConfig.pluginDirs != null) merged.pluginDirs = [...fileConfig.pluginDirs];
     merged.policy = mergePolicy(merged.policy, fileConfig.policy);
   }
 
@@ -254,6 +263,9 @@ export async function loadConfig(options: LoadConfigOptions): Promise<ResolvedCo
   if (cli.policy != null) merged.policy = mergePolicy(merged.policy, cli.policy);
   if (cli.skillPaths != null) {
     merged.skillPaths = [...(merged.skillPaths ?? []), ...cli.skillPaths];
+  }
+  if (cli.pluginDirs != null) {
+    merged.pluginDirs = [...(merged.pluginDirs ?? []), ...cli.pluginDirs];
   }
 
   return merged;

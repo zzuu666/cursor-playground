@@ -104,6 +104,8 @@ export interface TranscriptPayload {
   approvalLog?: ApprovalLogEntry[];
   /** 本次 run 加载的 Skill 路径与字符数摘要，便于审计。 */
   skillsLoaded?: { path: string; charCount: number }[];
+  /** 本次 run 加载的插件路径与 manifest name，便于审计。 */
+  pluginsLoaded?: { path: string; name: string }[];
 }
 
 /** 独立 error 日志单条，写入 errors.jsonl。 */

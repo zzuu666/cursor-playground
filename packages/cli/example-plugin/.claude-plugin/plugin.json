@@ -1,0 +1,5 @@
+{
+  "name": "example-plugin",
+  "description": "Example Claude Code style plugin for Phase 10",
+  "version": "1.0.0"
+}

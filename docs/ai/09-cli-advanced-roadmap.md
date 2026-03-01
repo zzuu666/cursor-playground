@@ -10,7 +10,7 @@
 |------|------|
 | **Skill** | CLI 加载外部 Skill（如 SKILL.md/规则文件），用于增强系统提示词或工具行为（仅「加载」侧，不对外暴露为 Skill） |
 | **MCP** | CLI 作为 MCP **客户端**：发现并调用外部 MCP 服务器的 tools/resources，注入到 Agent Loop |
-| **Plugin** | 可插拔插件（本地模块或 npm 包），注册工具、扩展配置或钩子 |
+| **Plugin** | Claude Code 式插件（目录 + `.claude-plugin/plugin.json` manifest），内含声明式 `skills/`、`agents/`、`hooks/`、MCP/LSP 配置等；通过 `--plugin-dir` 或配置加载，插件内 Skills 以 `plugin-name:skill-name` 命名空间并入现有 Skill 管线 |
 | **Memory** | 会话内记忆（已有）+ **跨会话持久化**（项目/用户级），可注入上下文 |
 | **上下文压缩** | 在现有「按条数 + 规则摘要」基础上，做到 **完备**：token 估算、按 token 触发、可选 LLM 摘要、与 Memory 结合 |
 | **UI** | 引入 **TUI**（如 Ink）：交互式命令中展示当前模型、上下文、状态栏、历史区等 |
@@ -82,29 +82,34 @@ flowchart LR
 
 ## Phase 10：Plugin 机制
 
-**目标**：支持通过配置或 CLI 加载「插件」（本地 JS/TS 模块或 npm 包），插件可注册额外工具、扩展配置或提供生命周期钩子，与内置工具统一由 ToolRegistry 管理。
+**目标**：支持 Claude Code 风格的插件：以目录为单位，包含 manifest（`.claude-plugin/plugin.json`）及可选的 `skills/`、`agents/`、`hooks/` 等声明式内容；通过 `--plugin-dir` 或配置加载，将插件提供的 Skills 以命名空间形式并入现有 Skill 加载与 system prompt 构建，与 Phase 9 行为一致且可追溯来源。
 
 **实现要点**：
 
-1. **插件契约**
-   - 定义插件入口约定：如 `export function register(ctx: PluginContext): void`，其中 `PluginContext` 提供 `registerTool(tool)`、`getConfig()`、可选 `onBeforeTurn` / `onAfterTurn` 等。
-   - 插件可返回或挂载「额外配置」供 config 合并（如白名单、policy 覆盖），需明确合并顺序与优先级。
+1. **Manifest 与插件契约**
+   - 约定插件根目录下存在 `.claude-plugin/plugin.json`（或允许仅包含 `skills/` 的轻量插件，manifest 可选）。
+   - Manifest 字段：`name`（必填，用作命名空间）、`description`、`version`、`author` 等；与 [Claude Code 文档](https://code.claude.com/docs/en/plugins) 对齐。
+   - 仅解析 JSON，不执行插件内自定义 JS/TS 代码。
 
-2. **加载方式**
-   - 支持路径形式：本地路径（相对 cwd 或绝对）、或 npm 包名（如 `mini-agent-plugin-xxx`，通过 `import()` 或 `require` 动态加载）。
-   - 在配置中增加 `plugins?: string[]`（路径或包名）；CLI 支持 `--plugin <path|pkg>` 可多次使用。
+2. **插件发现与加载方式**
+   - 配置项增加 `pluginDirs?: string[]`（路径列表）；CLI 增加 `--plugin-dir <path>`，可多次使用，与配置合并（例如：配置先，CLI 追加）。
+   - 启动时按顺序解析每个插件目录：若存在 `.claude-plugin/plugin.json` 则读取并校验 `name`；若不存在 manifest 但存在 `skills/`，可视为匿名插件或跳过（由实现决定）。
 
-3. **与 Loop / Registry 集成**
-   - 在启动时（在创建 AgentLoop 之前）按顺序加载各插件，将插件注册的工具加入现有 ToolRegistry；若插件返回需批准标记，与现有 `requiresApproval` 一致处理。
-   - 生命周期钩子（若有）在 loop 的合适位置调用，并做好错误隔离（单插件异常不拖垮主流程）。
+3. **Skills 集成（与 Phase 9 统一）**
+   - 对每个已识别插件，扫描其根下 `skills/` 子目录，每个子目录内若有 `SKILL.md`（或约定 `skill.json`），则加载为一条 Skill；来源标记或 skill id 使用 `plugin-name:子目录名`（与 Claude Code 命名空间一致）。
+   - 将上述 Skill 条目与现有 `loadSkills` / 全局 Skill 结果合并，统一进入 `buildSystemPrompt`，并在 transcript/verbose 中记录来源为插件及插件名。
 
-4. **安全与文档**
-   - 文档中说明：插件以与 CLI 相同权限运行，用户仅应加载可信插件；可选：插件签名或沙箱列为后续扩展，本 Phase 仅约定接口。
+4. **可选：Hooks / Agents / Settings**
+   - 若 Phase 10 包含 hooks：在插件根下读取 `hooks/hooks.json`，与现有（或新增）全局 hooks 配置合并，并在 Agent Loop 适当位置触发；格式与 Claude Code 文档一致。
+   - `agents/`、`settings.json`、`.mcp.json` 可在 Phase 10 仅做结构约定与文档说明，实际解析与使用留到 Phase 11（MCP）或后续 TUI/Agent 阶段。
+
+5. **可观测性与安全**
+   - transcript 或 `--verbose` 中列出本次 run 加载的插件路径及 manifest name；文档注明插件以与 CLI 相同权限运行，用户应只加载可信插件。
 
 **验收（DoD）**：
 
-- 通过 `--plugin <path>` 或配置 `plugins` 加载一个最小插件（仅注册一个只读工具），在单轮对话中可被模型调用并返回预期结果。
-- 不加载插件时行为与当前一致；transcript 或 `--verbose` 可体现已加载插件列表。
+- 给定一个符合上述约定的插件目录（含 `.claude-plugin/plugin.json` 与 `skills/hello/SKILL.md`），通过 `--plugin-dir ./that-plugin` 或配置 `pluginDirs` 加载后，system prompt 中可见该插件提供的 Skill 内容，且来源标记为 `plugin-name:hello`（或等价形式）；transcript/verbose 可体现已加载插件列表。
+- 不指定任何插件时，行为与当前一致；与 Phase 9 的 `--skill` / `skillPaths` 并存时，插件 Skills 与直接指定 Skills 一并合并，无冲突。
 
 ---
 

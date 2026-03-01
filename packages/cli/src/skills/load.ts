@@ -114,6 +114,21 @@ export async function loadGlobalSkillsFromRoot(
   return results;
 }
 
+/**
+ * 从插件根目录加载 Skills：扫描 pluginRoot/skills/ 下子目录，每个子目录内 SKILL.md 或 skill.json，
+ * 来源标记为 pluginName:子目录名（与 Claude Code 命名空间一致）。
+ */
+export async function loadSkillsFromPluginRoot(
+  pluginRoot: string,
+  pluginName: string
+): Promise<SkillEntry[]> {
+  const skillsDir = join(pluginRoot, "skills");
+  if (!existsSync(skillsDir)) return [];
+  const st = await stat(skillsDir).catch(() => null);
+  if (!st?.isDirectory()) return [];
+  return loadGlobalSkillsFromRoot(skillsDir, pluginName);
+}
+
 function derivePathPrefix(rootDir: string): string {
   if (rootDir.includes(".agents")) return "agents";
   if (rootDir.includes(".cursor")) return "cursor";
