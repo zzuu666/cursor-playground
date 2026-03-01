@@ -24,16 +24,19 @@ export interface OpenAICompatibleProviderOptions {
   tools?: OpenAIToolSpec[];
   maxRetries?: number;
   retryDelayMs?: number;
+  /** 覆盖默认 system prompt；不设则使用内置 SYSTEM_PROMPT。 */
+  systemPrompt?: string;
 }
 
 const MAX_TOKENS = 4096;
 
 /** 将 session 的 ConversationMessage[] 转为 OpenAI SDK 的 messages 格式 */
 function toOpenAIMessages(
-  messages: ConversationMessage[]
+  messages: ConversationMessage[],
+  systemPrompt: string = SYSTEM_PROMPT
 ): OpenAI.Chat.ChatCompletionMessageParam[] {
   const out: OpenAI.Chat.ChatCompletionMessageParam[] = [
-    { role: "system", content: SYSTEM_PROMPT },
+    { role: "system", content: systemPrompt },
   ];
 
   for (const msg of messages) {
@@ -134,6 +137,7 @@ export class OpenAICompatibleProvider implements ChatProvider {
   private readonly tools: OpenAIToolSpec[];
   private readonly maxRetries: number;
   private readonly retryDelayMs: number;
+  private readonly systemPrompt: string;
 
   constructor(options: OpenAICompatibleProviderOptions & { providerLabel?: string }) {
     this.name = options.providerLabel ?? "openai-compatible";
@@ -145,6 +149,7 @@ export class OpenAICompatibleProvider implements ChatProvider {
     this.tools = options.tools ?? [];
     this.maxRetries = options.maxRetries ?? 3;
     this.retryDelayMs = options.retryDelayMs ?? 1000;
+    this.systemPrompt = options.systemPrompt ?? SYSTEM_PROMPT;
   }
 
   async complete(messages: ConversationMessage[]): Promise<AssistantContentBlock[]> {
@@ -153,7 +158,7 @@ export class OpenAICompatibleProvider implements ChatProvider {
         const params: OpenAI.Chat.ChatCompletionCreateParamsNonStreaming = {
           model: this.model,
           max_tokens: MAX_TOKENS,
-          messages: toOpenAIMessages(messages),
+          messages: toOpenAIMessages(messages, this.systemPrompt),
         };
         if (this.tools.length > 0) {
           params.tools = this.tools.map((t) => ({

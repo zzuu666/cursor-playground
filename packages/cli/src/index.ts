@@ -20,11 +20,14 @@ import {
 } from "./infra/logger.js";
 import type { ChatProvider } from "./providers/base.js";
 import { createProvider, parseProviderId } from "./providers/factory.js";
+import { buildSystemPrompt } from "./skills/build-system-prompt.js";
+import { loadSkills } from "./skills/load.js";
 import { createExecuteCommandTool } from "./tools/execute-command.js";
 import { createGlobSearchTool } from "./tools/glob-search.js";
 import { createReadFileTool } from "./tools/read-file.js";
 import { createWriteFileTool } from "./tools/write-file.js";
 import { ToolRegistry } from "./tools/registry.js";
+import { SYSTEM_PROMPT } from "./prompts/system.js";
 
 async function readFromStdin(): Promise<string> {
   const chunks: Buffer[] = [];
@@ -103,6 +106,7 @@ async function main(): Promise<void> {
     .option("--approval <mode>", "tool approval: never | auto | prompt", "auto")
     .option("--verbose", "print per-turn request/response summary and tool in/out lengths")
     .option("--dry-run", "only print prompt and tool list, do not call LLM or tools")
+    .option("--skill <paths...>", "path(s) to SKILL.md or skill dir (e.g. --skill path1 path2)")
     .addHelpText(
       "after",
       "\nExample:\n  mini-agent --provider mock --prompt \"hello\"\n  mini-agent --provider deepseek --approval prompt --prompt \"write a ts file\"\n"
@@ -119,6 +123,7 @@ async function main(): Promise<void> {
     approval: string;
     verbose: boolean;
     dryRun: boolean;
+    skill?: string[];
   }>();
 
   let resolved: ResolvedConfig;
@@ -135,6 +140,8 @@ async function main(): Promise<void> {
     };
     if (opts.model != null) cliOverrides.model = opts.model;
     if (opts.transcriptDir != null) cliOverrides.transcriptDir = opts.transcriptDir;
+    const cliSkillPaths = Array.isArray(opts.skill) ? opts.skill : typeof opts.skill === "string" ? [opts.skill] : [];
+    if (cliSkillPaths.length > 0) cliOverrides.skillPaths = cliSkillPaths;
     resolved = await loadConfig({
       ...(opts.config != null && { configPath: opts.config }),
       cwd: process.cwd(),
@@ -145,6 +152,15 @@ async function main(): Promise<void> {
     process.stderr.write(`mini-agent config error: ${redactForLog(message)}\n`);
     process.exitCode = EXIT_CONFIG;
     return;
+  }
+
+  let skillsLoaded: { path: string; charCount: number }[] | undefined;
+  if (resolved.skillPaths != null && resolved.skillPaths.length > 0) {
+    const skillEntries = await loadSkills(resolved.skillPaths, process.cwd());
+    if (skillEntries.length > 0) {
+      resolved = { ...resolved, systemPrompt: buildSystemPrompt(skillEntries, SYSTEM_PROMPT) };
+      skillsLoaded = skillEntries.map((e) => ({ path: e.path, charCount: e.charCount }));
+    }
   }
 
   const registry = new ToolRegistry();
@@ -165,7 +181,14 @@ async function main(): Promise<void> {
   if (resolved.dryRun) {
     process.stderr.write(`[dry-run] prompt: ${initialPrompt ?? "(none)"}\n`);
     process.stderr.write(`[dry-run] tools: ${registry.list().map((t) => t.name).join(", ") || "none"}\n`);
+    if (skillsLoaded?.length) {
+      process.stderr.write(`[dry-run] skills: ${skillsLoaded.map((s) => `${s.path} (${s.charCount} chars)`).join(", ")}\n`);
+    }
     return;
+  }
+
+  if (resolved.verbose && skillsLoaded?.length) {
+    process.stderr.write(`[verbose] skills loaded: ${skillsLoaded.map((s) => `${s.path} (${s.charCount} chars)`).join(", ")}\n`);
   }
 
   let provider: ChatProvider;
@@ -221,6 +244,7 @@ async function main(): Promise<void> {
           elapsedTotalMs: result.elapsedTotalMs,
         },
         ...(result.approvalLog.length > 0 && { approvalLog: result.approvalLog }),
+        ...(skillsLoaded != null && skillsLoaded.length > 0 && { skillsLoaded }),
       });
       output.write(
         `sessionId=${sessionId} turns=${result.turns}, toolCalls=${result.toolCalls}, elapsed=${result.elapsedTotalMs}ms\ntranscript=${transcriptPath}\n`
@@ -238,6 +262,7 @@ async function main(): Promise<void> {
           policy: resolved.policy,
           messages: session.getMessages(),
           meta,
+          ...(skillsLoaded != null && skillsLoaded.length > 0 && { skillsLoaded }),
         });
         await appendErrorLog(resolved.transcriptDir, {
           sessionId,
@@ -305,6 +330,7 @@ async function main(): Promise<void> {
           policy: resolved.policy,
           messages: session.getMessages(),
           meta,
+          ...(skillsLoaded != null && skillsLoaded.length > 0 && { skillsLoaded }),
         });
         await appendErrorLog(resolved.transcriptDir, {
           sessionId,
@@ -325,6 +351,7 @@ async function main(): Promise<void> {
     provider: provider.name,
     policy: resolved.policy,
     messages: session.getMessages(),
+    ...(skillsLoaded != null && skillsLoaded.length > 0 && { skillsLoaded }),
   });
   output.write(`sessionId=${sessionId} transcript=${transcriptPath}\n`);
   clearSessionId();

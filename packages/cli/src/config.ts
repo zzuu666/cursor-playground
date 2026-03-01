@@ -37,6 +37,8 @@ export interface ConfigFile {
   approval?: ApprovalMode;
   /** 允许 execute_command 执行的可执行名列表，如 ["npm","node"]；不设则用内置默认列表。 */
   allowedCommands?: string[];
+  /** Skill 文件或目录路径列表，用于加载 SKILL.md / skill.json 并注入 system prompt。 */
+  skillPaths?: string[];
 }
 
 /** Resolved run config after merging defaults → config file → env → CLI. */
@@ -51,6 +53,10 @@ export interface ResolvedConfig {
   dryRun: boolean;
   /** 仅来自配置文件；不设则工具使用内置默认白名单。 */
   allowedCommands?: string[];
+  /** 合并后的 Skill 路径列表（配置 + CLI 追加）。 */
+  skillPaths?: string[];
+  /** 合并默认 SYSTEM_PROMPT 与 Skill 片段后的完整 system prompt；由入口在 loadConfig 后填充。 */
+  systemPrompt?: string;
 }
 
 export interface MinimaxConfig {
@@ -72,7 +78,7 @@ export interface LoadConfigOptions {
   cwd: string;
   /** CLI overrides (highest priority). */
   cli?: Partial<
-    Pick<ResolvedConfig, "provider" | "model" | "transcriptDir" | "approval" | "verbose" | "dryRun"> & {
+    Pick<ResolvedConfig, "provider" | "model" | "transcriptDir" | "approval" | "verbose" | "dryRun" | "skillPaths"> & {
       policy?: Partial<LoopPolicy>;
     }
   >;
@@ -139,6 +145,10 @@ async function readConfigFile(filePath: string): Promise<ConfigFile> {
     const list = (obj.allowedCommands as unknown[]).filter((x): x is string => typeof x === "string");
     if (list.length > 0) config.allowedCommands = list;
   }
+  if (Array.isArray(obj.skillPaths)) {
+    const list = (obj.skillPaths as unknown[]).filter((x): x is string => typeof x === "string");
+    if (list.length > 0) config.skillPaths = list;
+  }
   return config;
 }
 
@@ -175,6 +185,7 @@ export async function loadConfig(options: LoadConfigOptions): Promise<ResolvedCo
     if (fileConfig.baseURL != null) merged.baseURL = fileConfig.baseURL;
     if (fileConfig.approval != null) merged.approval = fileConfig.approval;
     if (fileConfig.allowedCommands != null) merged.allowedCommands = fileConfig.allowedCommands;
+    if (fileConfig.skillPaths != null) merged.skillPaths = [...fileConfig.skillPaths];
     merged.policy = mergePolicy(merged.policy, fileConfig.policy);
   }
 
@@ -192,6 +203,9 @@ export async function loadConfig(options: LoadConfigOptions): Promise<ResolvedCo
   if (cli.verbose != null) merged.verbose = cli.verbose;
   if (cli.dryRun != null) merged.dryRun = cli.dryRun;
   if (cli.policy != null) merged.policy = mergePolicy(merged.policy, cli.policy);
+  if (cli.skillPaths != null) {
+    merged.skillPaths = [...(merged.skillPaths ?? []), ...cli.skillPaths];
+  }
 
   return merged;
 }

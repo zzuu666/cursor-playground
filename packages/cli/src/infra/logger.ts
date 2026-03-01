@@ -102,6 +102,8 @@ export interface TranscriptPayload {
   meta?: TranscriptMeta;
   /** 本次 run 内发生的工具批准/拒绝记录。 */
   approvalLog?: ApprovalLogEntry[];
+  /** 本次 run 加载的 Skill 路径与字符数摘要，便于审计。 */
+  skillsLoaded?: { path: string; charCount: number }[];
 }
 
 /** 独立 error 日志单条，写入 errors.jsonl。 */

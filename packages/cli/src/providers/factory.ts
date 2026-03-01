@@ -49,6 +49,8 @@ export function createProvider(
     retryDelayMs: resolved.policy.retryDelayMs,
   };
 
+  const systemPromptOpt = resolved.systemPrompt != null ? { systemPrompt: resolved.systemPrompt } : {};
+
   switch (providerId) {
     case "mock":
       return new MockProvider();
@@ -58,6 +60,7 @@ export function createProvider(
         ...cfg,
         tools: apiTools,
         ...retry,
+        ...systemPromptOpt,
       });
     }
     case "openai": {
@@ -67,6 +70,7 @@ export function createProvider(
         tools: openaiTools,
         ...retry,
         providerLabel: "openai",
+        ...systemPromptOpt,
       });
     }
     case "deepseek": {
@@ -76,6 +80,7 @@ export function createProvider(
         tools: openaiTools,
         ...retry,
         providerLabel: "deepseek",
+        ...systemPromptOpt,
       });
     }
     default: {

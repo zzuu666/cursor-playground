@@ -23,6 +23,8 @@ export interface AnthropicProviderOptions {
   tools?: AnthropicToolSpec[];
   maxRetries?: number;
   retryDelayMs?: number;
+  /** 覆盖默认 system prompt；不设则使用内置 SYSTEM_PROMPT。 */
+  systemPrompt?: string;
 }
 
 const MAX_TOKENS = 4096;
@@ -106,6 +108,7 @@ export class AnthropicProvider implements ChatProvider {
   private readonly tools: AnthropicToolSpec[];
   private readonly maxRetries: number;
   private readonly retryDelayMs: number;
+  private readonly systemPrompt: string;
 
   constructor(options: AnthropicProviderOptions) {
     this.client = new Anthropic({
@@ -116,6 +119,7 @@ export class AnthropicProvider implements ChatProvider {
     this.tools = options.tools ?? [];
     this.maxRetries = options.maxRetries ?? 3;
     this.retryDelayMs = options.retryDelayMs ?? 1000;
+    this.systemPrompt = options.systemPrompt ?? SYSTEM_PROMPT;
   }
 
   async complete(
@@ -127,7 +131,7 @@ export class AnthropicProvider implements ChatProvider {
         const base = {
           model: this.model as "claude-3-5-sonnet-20241022",
           max_tokens: MAX_TOKENS,
-          system: SYSTEM_PROMPT,
+          system: this.systemPrompt,
           messages: anthropicMessages as Parameters<Anthropic["messages"]["create"]>[0]["messages"],
         };
         type CreateParams = Parameters<Anthropic["messages"]["create"]>[0];
@@ -155,7 +159,7 @@ export class AnthropicProvider implements ChatProvider {
         const base = {
           model: this.model as "claude-3-5-sonnet-20241022",
           max_tokens: MAX_TOKENS,
-          system: SYSTEM_PROMPT,
+          system: this.systemPrompt,
           messages: anthropicMessages as Parameters<Anthropic["messages"]["stream"]>[0]["messages"],
         };
         type StreamParams = Parameters<Anthropic["messages"]["stream"]>[0];
