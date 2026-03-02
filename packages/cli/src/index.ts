@@ -23,6 +23,9 @@ import {
 import type { ChatProvider } from "./providers/base.js";
 import { createProvider, parseProviderId } from "./providers/factory.js";
 import { discoverPlugins } from "./plugins/discover.js";
+import { getPluginMcpServers } from "./plugins/plugin-mcp.js";
+import { connectAndListTools } from "./mcp/client.js";
+import { createToolAdapters } from "./mcp/adapter.js";
 import { buildSystemPrompt } from "./skills/build-system-prompt.js";
 import { loadAllGlobalSkills, loadSkills } from "./skills/load.js";
 import { createExecuteCommandTool } from "./tools/execute-command.js";
@@ -111,6 +114,7 @@ async function main(): Promise<void> {
     .option("--dry-run", "only print prompt and tool list, do not call LLM or tools")
     .option("--skill <paths...>", "path(s) to SKILL.md or skill dir (e.g. --skill path1 path2)")
     .option("--plugin-dir <paths...>", "path(s) to plugin directory (Claude Code style, e.g. --plugin-dir ./p1 ./p2)")
+    .option("--mcp <names...>", "MCP server name(s) to enable (default: all configured)")
     .addHelpText(
       "after",
       "\nExample:\n  mini-agent --provider mock --prompt \"hello\"\n  mini-agent --provider deepseek --approval prompt --prompt \"write a ts file\"\n"
@@ -129,8 +133,10 @@ async function main(): Promise<void> {
     dryRun: boolean;
     skill?: string[];
     pluginDir?: string[];
+    mcp?: string[];
   }>();
 
+  const cliMcpNames = Array.isArray(opts.mcp) ? opts.mcp : typeof opts.mcp === "string" ? [opts.mcp] : [];
   let resolved: ResolvedConfig;
   try {
     const approvalMode =
@@ -149,6 +155,7 @@ async function main(): Promise<void> {
     if (cliSkillPaths.length > 0) cliOverrides.skillPaths = cliSkillPaths;
     const cliPluginDirs = Array.isArray(opts.pluginDir) ? opts.pluginDir : typeof opts.pluginDir === "string" ? [opts.pluginDir] : [];
     if (cliPluginDirs.length > 0) cliOverrides.pluginDirs = cliPluginDirs;
+    if (cliMcpNames.length > 0) cliOverrides.enabledMcpServerNames = cliMcpNames;
     const cliPackageRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
     resolved = await loadConfig({
       ...(opts.config != null && { configPath: opts.config }),
@@ -185,6 +192,17 @@ async function main(): Promise<void> {
     skillsLoaded = allEntries.map((e) => ({ path: e.path, charCount: e.charCount }));
   }
 
+  const pluginMcp = await getPluginMcpServers(pluginsLoaded);
+  if (Object.keys(pluginMcp).length > 0) {
+    resolved = {
+      ...resolved,
+      mcpServers: { ...(resolved.mcpServers ?? {}), ...pluginMcp },
+    };
+  }
+  if (resolved.mcpServers != null && Object.keys(resolved.mcpServers).length > 0 && cliMcpNames.length === 0) {
+    resolved = { ...resolved, enabledMcpServerNames: Object.keys(resolved.mcpServers) };
+  }
+
   const registry = new ToolRegistry();
   const workspaceCwd = process.cwd();
   registry.register(createReadFileTool(workspaceCwd));
@@ -198,6 +216,29 @@ async function main(): Promise<void> {
     })
   );
 
+  const toolTimeoutMs = resolved.policy.toolTimeoutMs ?? 60_000;
+  let mcpServersLoaded: { name: string; tools: string[] }[] = [];
+  const enabledMcp = resolved.enabledMcpServerNames ?? [];
+  const mcpServersConfig = resolved.mcpServers ?? {};
+  if (enabledMcp.length > 0 && Object.keys(mcpServersConfig).length > 0) {
+    for (const serverName of enabledMcp) {
+      const config = mcpServersConfig[serverName];
+      if (config == null) continue;
+      try {
+        const conn = await connectAndListTools(serverName, config, toolTimeoutMs);
+        const adapters = createToolAdapters(serverName, conn, toolTimeoutMs);
+        for (const t of adapters) registry.register(t);
+        mcpServersLoaded.push({
+          name: serverName,
+          tools: adapters.map((t) => t.name),
+        });
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        process.stderr.write(`[mcp] failed to connect "${serverName}": ${redactForLog(msg)}\n`);
+      }
+    }
+  }
+
   const initialPrompt = await loadPrompt(opts.prompt);
 
   if (resolved.dryRun) {
@@ -209,9 +250,17 @@ async function main(): Promise<void> {
     if (pluginsLoaded.length > 0) {
       process.stderr.write(`[dry-run] plugins: ${pluginsLoaded.map((p) => `${p.path} (${p.name})`).join(", ")}\n`);
     }
+    if (enabledMcp.length > 0 && Object.keys(mcpServersConfig).length > 0) {
+      process.stderr.write(`[dry-run] mcp servers (configured): ${enabledMcp.join(", ")}\n`);
+    }
     return;
   }
 
+  if (resolved.verbose && mcpServersLoaded.length > 0) {
+    process.stderr.write(
+      `[verbose] mcp servers: ${mcpServersLoaded.map((m) => `${m.name} (${m.tools.join(", ")})`).join("; ")}\n`
+    );
+  }
   if (resolved.verbose && skillsLoaded?.length) {
     process.stderr.write(`[verbose] skills loaded: ${skillsLoaded.map((s) => `${s.path} (${s.charCount} chars)`).join(", ")}\n`);
   }
@@ -274,6 +323,7 @@ async function main(): Promise<void> {
         ...(result.approvalLog.length > 0 && { approvalLog: result.approvalLog }),
         ...(skillsLoaded != null && skillsLoaded.length > 0 && { skillsLoaded }),
         ...(pluginsLoaded.length > 0 && { pluginsLoaded }),
+        ...(mcpServersLoaded.length > 0 && { mcpServersLoaded }),
       });
       output.write(
         `sessionId=${sessionId} turns=${result.turns}, toolCalls=${result.toolCalls}, elapsed=${result.elapsedTotalMs}ms\ntranscript=${transcriptPath}\n`
@@ -293,6 +343,7 @@ async function main(): Promise<void> {
           meta,
           ...(skillsLoaded != null && skillsLoaded.length > 0 && { skillsLoaded }),
           ...(pluginsLoaded.length > 0 && { pluginsLoaded }),
+          ...(mcpServersLoaded.length > 0 && { mcpServersLoaded }),
         });
         await appendErrorLog(resolved.transcriptDir, {
           sessionId,
@@ -362,6 +413,7 @@ async function main(): Promise<void> {
           meta,
           ...(skillsLoaded != null && skillsLoaded.length > 0 && { skillsLoaded }),
           ...(pluginsLoaded.length > 0 && { pluginsLoaded }),
+          ...(mcpServersLoaded.length > 0 && { mcpServersLoaded }),
         });
         await appendErrorLog(resolved.transcriptDir, {
           sessionId,
@@ -384,6 +436,7 @@ async function main(): Promise<void> {
     messages: session.getMessages(),
     ...(skillsLoaded != null && skillsLoaded.length > 0 && { skillsLoaded }),
     ...(pluginsLoaded.length > 0 && { pluginsLoaded }),
+    ...(mcpServersLoaded.length > 0 && { mcpServersLoaded }),
   });
   output.write(`sessionId=${sessionId} transcript=${transcriptPath}\n`);
   clearSessionId();

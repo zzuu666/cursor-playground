@@ -106,6 +106,8 @@ export interface TranscriptPayload {
   skillsLoaded?: { path: string; charCount: number }[];
   /** 本次 run 加载的插件路径与 manifest name，便于审计。 */
   pluginsLoaded?: { path: string; name: string }[];
+  /** 本次 run 连接的 MCP 服务器及暴露的工具名列表（注册名如 mcp_xxx_yyy）。 */
+  mcpServersLoaded?: { name: string; tools: string[] }[];
 }
 
 /** 独立 error 日志单条，写入 errors.jsonl。 */

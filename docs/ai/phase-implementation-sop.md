@@ -145,5 +145,6 @@
 | 8 | [04-code-agent-commercial-plan.md](04-code-agent-commercial-plan.md) § Phase 8 | [08-phase8-runbook.md](08-phase8-runbook.md) |
 | 9 | [09-cli-advanced-roadmap.md](09-cli-advanced-roadmap.md) § Phase 9、[plan-phase-9.md](plan-phase-9.md) | [09-phase9-runbook.md](09-phase9-runbook.md) |
 | 10 | [09-cli-advanced-roadmap.md](09-cli-advanced-roadmap.md) § Phase 10、[plan-phase-10.md](plan-phase-10.md) | [10-phase10-runbook.md](10-phase10-runbook.md) |
+| 11 | [09-cli-advanced-roadmap.md](09-cli-advanced-roadmap.md) § Phase 11、[plan-phase-11.md](plan-phase-11.md) | [11-phase11-runbook.md](11-phase11-runbook.md) |
 
 后续新增 Phase n 时，在总览方案中增加对应 Phase 小节，并新增 `0n-phaseN-runbook.md`（n 为 Phase 编号），保持本索引更新。

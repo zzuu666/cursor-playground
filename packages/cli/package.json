@@ -15,6 +15,7 @@
   },
   "dependencies": {
     "@anthropic-ai/sdk": "latest",
+    "@modelcontextprotocol/sdk": "latest",
     "commander": "latest",
     "dotenv": "latest",
     "glob": "latest",

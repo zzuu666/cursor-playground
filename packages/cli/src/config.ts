@@ -6,6 +6,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { LoopPolicy } from "./agent/policy.js";
 import { DEFAULT_LOOP_POLICY } from "./agent/policy.js";
+import { expandMcpServerConfig } from "./mcp/env-expand.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -28,6 +29,27 @@ function parseApprovalMode(value: unknown): ApprovalMode | undefined {
   return undefined;
 }
 
+/** MCP 服务配置：stdio（本地进程）或 http（远程），与 Claude Code / .mcp.json 兼容。 */
+export interface McpServerConfigStdio {
+  type?: "stdio";
+  command: string;
+  args?: string[];
+  env?: Record<string, string>;
+}
+
+export interface McpServerConfigHttp {
+  type: "http";
+  url: string;
+  headers?: Record<string, string>;
+}
+
+export type McpServerConfig = McpServerConfigStdio | McpServerConfigHttp;
+
+/** 判断是否为 HTTP 配置（按 type 或缺少 command 判断）。 */
+export function isMcpServerConfigHttp(c: McpServerConfig): c is McpServerConfigHttp {
+  return c.type === "http";
+}
+
 /** Config file schema (all optional). */
 export interface ConfigFile {
   provider?: string;
@@ -46,6 +68,8 @@ export interface ConfigFile {
   skipGlobalSkills?: boolean;
   /** 插件目录路径列表（Claude Code 式，含 .claude-plugin/plugin.json）；配置先，CLI 追加。 */
   pluginDirs?: string[];
+  /** MCP 服务器配置（stdio / http），与 .mcp.json 格式一致。 */
+  mcpServers?: Record<string, McpServerConfig>;
 }
 
 /** Resolved run config after merging defaults → config file → env → CLI. */
@@ -70,6 +94,10 @@ export interface ResolvedConfig {
   skipGlobalSkills?: boolean;
   /** 合并后的插件目录列表（配置 + CLI 追加）。 */
   pluginDirs?: string[];
+  /** 合并后的 MCP 服务器配置（配置文件 + 项目 .mcp.json + 插件）。 */
+  mcpServers?: Record<string, McpServerConfig>;
+  /** 本次 run 启用的 MCP 服务器名称列表；未传 --mcp 时为 mcpServers 的全部 key。 */
+  enabledMcpServerNames?: string[];
 }
 
 export interface MinimaxConfig {
@@ -93,7 +121,7 @@ export interface LoadConfigOptions {
   defaultTranscriptDir?: string;
   /** CLI overrides (highest priority). */
   cli?: Partial<
-    Pick<ResolvedConfig, "provider" | "model" | "transcriptDir" | "approval" | "verbose" | "dryRun" | "skillPaths" | "pluginDirs"> & {
+    Pick<ResolvedConfig, "provider" | "model" | "transcriptDir" | "approval" | "verbose" | "dryRun" | "skillPaths" | "pluginDirs" | "enabledMcpServerNames"> & {
       policy?: Partial<LoopPolicy>;
     }
   >;
@@ -187,7 +215,85 @@ async function readConfigFile(filePath: string): Promise<ConfigFile> {
     const list = (obj.pluginDirs as unknown[]).filter((x): x is string => typeof x === "string");
     if (list.length > 0) config.pluginDirs = list;
   }
+  if (typeof obj.mcpServers === "object" && obj.mcpServers !== null && !Array.isArray(obj.mcpServers)) {
+    const servers = obj.mcpServers as Record<string, unknown>;
+    const mcpServers: Record<string, McpServerConfig> = {};
+    for (const [name, entry] of Object.entries(servers)) {
+      const c = parseOneMcpServerConfig(entry);
+      if (c) mcpServers[name] = c;
+    }
+    if (Object.keys(mcpServers).length > 0) config.mcpServers = mcpServers;
+  }
   return config;
+}
+
+/** 解析单条 MCP 服务配置（stdio 或 http），供 readMcpJsonFromPath 与插件 MCP 复用。 */
+export function parseOneMcpServerConfig(entry: unknown): McpServerConfig | null {
+  if (entry == null || typeof entry !== "object" || Array.isArray(entry)) return null;
+  const o = entry as Record<string, unknown>;
+  if (o.type === "http") {
+    const url = o.url;
+    if (typeof url !== "string" || !url.trim()) return null;
+    const headers: Record<string, string> = {};
+    if (typeof o.headers === "object" && o.headers !== null && !Array.isArray(o.headers)) {
+      for (const [k, v] of Object.entries(o.headers)) {
+        if (typeof v === "string") headers[k] = v;
+      }
+    }
+    return { type: "http", url: url.trim(), ...(Object.keys(headers).length > 0 && { headers }) };
+  }
+  const command = o.command;
+  if (typeof command !== "string" || !command.trim()) return null;
+  const args: string[] = [];
+  if (Array.isArray(o.args)) {
+    for (const a of o.args) {
+      if (typeof a === "string") args.push(a);
+    }
+  }
+  const env: Record<string, string> = {};
+  if (typeof o.env === "object" && o.env !== null && !Array.isArray(o.env)) {
+    for (const [k, v] of Object.entries(o.env)) {
+      if (typeof v === "string") env[k] = v;
+    }
+  }
+  return {
+    ...(o.type === "stdio" && { type: "stdio" as const }),
+    command: command.trim(),
+    ...(args.length > 0 && { args }),
+    ...(Object.keys(env).length > 0 && { env }),
+  };
+}
+
+/**
+ * 从指定路径读取 .mcp.json 或任意含 mcpServers 的 JSON 文件，解析并与 Claude Code 格式兼容。
+ */
+export async function readMcpJsonFromPath(
+  filePath: string
+): Promise<Record<string, McpServerConfig> | null> {
+  if (!existsSync(filePath)) return null;
+  try {
+    const raw = await readFile(filePath, "utf-8");
+    const parsed = JSON.parse(raw) as unknown;
+    if (parsed == null || typeof parsed !== "object" || Array.isArray(parsed)) return null;
+    const obj = parsed as Record<string, unknown>;
+    const servers = obj.mcpServers;
+    if (typeof servers !== "object" || servers === null || Array.isArray(servers)) return null;
+    const result: Record<string, McpServerConfig> = {};
+    for (const [name, entry] of Object.entries(servers)) {
+      const c = parseOneMcpServerConfig(entry);
+      if (c) result[name] = c;
+    }
+    return Object.keys(result).length > 0 ? result : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * 读取项目根目录 .mcp.json（若存在），解析 mcpServers 并与 Claude Code 格式兼容。
+ */
+export async function readProjectMcpJson(cwd: string): Promise<Record<string, McpServerConfig> | null> {
+  return readMcpJsonFromPath(join(cwd, ".mcp.json"));
 }
 
 /**
@@ -231,6 +337,20 @@ export async function loadConfig(options: LoadConfigOptions): Promise<ResolvedCo
     if (fileConfig.skipGlobalSkills != null) merged.skipGlobalSkills = fileConfig.skipGlobalSkills;
     if (fileConfig.pluginDirs != null) merged.pluginDirs = [...fileConfig.pluginDirs];
     merged.policy = mergePolicy(merged.policy, fileConfig.policy);
+    if (fileConfig.mcpServers != null && Object.keys(fileConfig.mcpServers).length > 0) {
+      merged.mcpServers = {};
+      for (const [name, cfg] of Object.entries(fileConfig.mcpServers)) {
+        merged.mcpServers[name] = expandMcpServerConfig(cfg);
+      }
+    }
+  }
+
+  const projectMcp = await readProjectMcpJson(cwd);
+  if (projectMcp != null) {
+    merged.mcpServers = { ...(merged.mcpServers ?? {}) };
+    for (const [name, cfg] of Object.entries(projectMcp)) {
+      merged.mcpServers[name] = expandMcpServerConfig(cfg);
+    }
   }
 
   const envGlobalSkillDirs = process.env.GLOBAL_SKILLS_DIRS?.trim();
@@ -266,6 +386,11 @@ export async function loadConfig(options: LoadConfigOptions): Promise<ResolvedCo
   }
   if (cli.pluginDirs != null) {
     merged.pluginDirs = [...(merged.pluginDirs ?? []), ...cli.pluginDirs];
+  }
+  if (cli.enabledMcpServerNames != null) {
+    merged.enabledMcpServerNames = cli.enabledMcpServerNames;
+  } else if (merged.mcpServers != null && Object.keys(merged.mcpServers).length > 0) {
+    merged.enabledMcpServerNames = Object.keys(merged.mcpServers);
   }
 
   return merged;
