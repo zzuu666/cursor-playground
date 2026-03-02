@@ -108,6 +108,10 @@ export interface TranscriptPayload {
   pluginsLoaded?: { path: string; name: string }[];
   /** 本次 run 连接的 MCP 服务器及暴露的工具名列表（注册名如 mcp_xxx_yyy）。 */
   mcpServersLoaded?: { name: string; tools: string[] }[];
+  /** 本次 run 加载的 CLAUDE.md 路径与来源（Phase 12）。 */
+  claudeMdLoaded?: { path: string; source: "project" | "user" | "local"; lineCount?: number }[];
+  /** 本次 run Auto Memory 加载情况：是否启用、MEMORY.md 行数等（Phase 12）。 */
+  autoMemoryLoaded?: { enabled: boolean; lineCount: number; path?: string };
 }
 
 /** 独立 error 日志单条，写入 errors.jsonl。 */

@@ -32,8 +32,11 @@ import { createExecuteCommandTool } from "./tools/execute-command.js";
 import { createGlobSearchTool } from "./tools/glob-search.js";
 import { createReadFileTool } from "./tools/read-file.js";
 import { createWriteFileTool } from "./tools/write-file.js";
+import { createMemoryWriteTool } from "./tools/memory-write.js";
 import { ToolRegistry } from "./tools/registry.js";
 import { SYSTEM_PROMPT } from "./prompts/system.js";
+import { findClaudeMdPaths, loadClaudeMdContent, mergeAndTag } from "./memory/claude-md.js";
+import { getProjectId, getAutoMemoryFragment } from "./memory/auto-memory.js";
 
 async function readFromStdin(): Promise<string> {
   const chunks: Buffer[] = [];
@@ -59,6 +62,7 @@ type RunOneTurnOpts = {
   verbose: boolean;
   approvalMode: ResolvedConfig["approval"];
   onApprovalRequest?: (toolName: string, inputSummary: string) => Promise<{ approved: boolean; reason?: string }>;
+  getMemoryFragment?: () => Promise<string>;
 };
 
 function runOneTurn(
@@ -73,6 +77,7 @@ function runOneTurn(
     approvalMode: opts.approvalMode,
     ...(opts.onApprovalRequest != null && { onApprovalRequest: opts.onApprovalRequest }),
     ...(opts.stream && provider.streamComplete && { onStreamText: (delta: string) => output.write(delta) }),
+    ...(opts.getMemoryFragment != null && { getMemoryFragment: opts.getMemoryFragment }),
   };
   return loop.run(session, prompt, runOptions);
 }
@@ -115,6 +120,9 @@ async function main(): Promise<void> {
     .option("--skill <paths...>", "path(s) to SKILL.md or skill dir (e.g. --skill path1 path2)")
     .option("--plugin-dir <paths...>", "path(s) to plugin directory (Claude Code style, e.g. --plugin-dir ./p1 ./p2)")
     .option("--mcp <names...>", "MCP server name(s) to enable (default: all configured)")
+    .option("--no-auto-memory", "disable Auto Memory (MEMORY.md injection)")
+    .option("--claude-md-exclude <paths...>", "path(s) or prefix(es) to exclude from CLAUDE.md loading")
+    .option("--memory-path <path>", "override Auto Memory root directory (default: ~/.claude)")
     .addHelpText(
       "after",
       "\nExample:\n  mini-agent --provider mock --prompt \"hello\"\n  mini-agent --provider deepseek --approval prompt --prompt \"write a ts file\"\n"
@@ -134,6 +142,9 @@ async function main(): Promise<void> {
     skill?: string[];
     pluginDir?: string[];
     mcp?: string[];
+    autoMemory?: boolean;
+    claudeMdExclude?: string[];
+    memoryPath?: string;
   }>();
 
   const cliMcpNames = Array.isArray(opts.mcp) ? opts.mcp : typeof opts.mcp === "string" ? [opts.mcp] : [];
@@ -156,6 +167,14 @@ async function main(): Promise<void> {
     const cliPluginDirs = Array.isArray(opts.pluginDir) ? opts.pluginDir : typeof opts.pluginDir === "string" ? [opts.pluginDir] : [];
     if (cliPluginDirs.length > 0) cliOverrides.pluginDirs = cliPluginDirs;
     if (cliMcpNames.length > 0) cliOverrides.enabledMcpServerNames = cliMcpNames;
+    if (opts.autoMemory === false) cliOverrides.autoMemoryEnabled = false;
+    const cliClaudeMdExclude = Array.isArray(opts.claudeMdExclude)
+      ? opts.claudeMdExclude
+      : typeof opts.claudeMdExclude === "string"
+        ? [opts.claudeMdExclude]
+        : [];
+    if (cliClaudeMdExclude.length > 0) cliOverrides.claudeMdExcludes = cliClaudeMdExclude;
+    if (opts.memoryPath != null) cliOverrides.memoryPath = opts.memoryPath;
     const cliPackageRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
     resolved = await loadConfig({
       ...(opts.config != null && { configPath: opts.config }),
@@ -187,10 +206,30 @@ async function main(): Promise<void> {
     pluginsLoaded = discovered.pluginsLoaded;
   }
   const allEntries = [...globalEntries, ...projectEntries, ...pluginEntries];
+  let baseSystemPrompt = allEntries.length > 0 ? buildSystemPrompt(allEntries, SYSTEM_PROMPT) : SYSTEM_PROMPT;
   if (allEntries.length > 0) {
-    resolved = { ...resolved, systemPrompt: buildSystemPrompt(allEntries, SYSTEM_PROMPT) };
     skillsLoaded = allEntries.map((e) => ({ path: e.path, charCount: e.charCount }));
   }
+
+  let claudeMdLoaded: { path: string; source: "project" | "user" | "local"; lineCount?: number }[] | undefined;
+  const claudePaths = findClaudeMdPaths(process.cwd());
+  if (claudePaths.length > 0) {
+    const claudeEntries = await loadClaudeMdContent(
+      claudePaths,
+      resolved.claudeMdExcludes ?? [],
+      process.cwd()
+    );
+    if (claudeEntries.length > 0) {
+      const claudeMerged = mergeAndTag(claudeEntries);
+      baseSystemPrompt = baseSystemPrompt + "\n\n" + claudeMerged.text;
+      claudeMdLoaded = claudeMerged.entries.map((e) => ({
+        path: e.path,
+        source: e.source,
+        ...(e.lineCount != null && { lineCount: e.lineCount }),
+      }));
+    }
+  }
+  resolved = { ...resolved, systemPrompt: baseSystemPrompt };
 
   const pluginMcp = await getPluginMcpServers(pluginsLoaded);
   if (Object.keys(pluginMcp).length > 0) {
@@ -215,6 +254,9 @@ async function main(): Promise<void> {
       timeoutMs: 60_000,
     })
   );
+  const memoryWriteOpts: { cwd: string; memoryPath?: string } = { cwd: workspaceCwd };
+  if (resolved.memoryPath != null && resolved.memoryPath !== "") memoryWriteOpts.memoryPath = resolved.memoryPath;
+  registry.register(createMemoryWriteTool(memoryWriteOpts));
 
   const toolTimeoutMs = resolved.policy.toolTimeoutMs ?? 60_000;
   let mcpServersLoaded: { name: string; tools: string[] }[] = [];
@@ -239,6 +281,21 @@ async function main(): Promise<void> {
     }
   }
 
+  const projectId = getProjectId(workspaceCwd);
+  const autoMemoryEnabled = resolved.autoMemoryEnabled !== false;
+  let autoMemoryLoaded: { enabled: boolean; lineCount: number; path?: string } | undefined;
+  if (autoMemoryEnabled) {
+    const first = await getAutoMemoryFragment(projectId, 200, resolved.memoryPath);
+    autoMemoryLoaded = { enabled: true, lineCount: first.lineCount, path: first.path };
+  } else {
+    autoMemoryLoaded = { enabled: false, lineCount: 0 };
+  }
+  const getMemoryFragment = async (): Promise<string> => {
+    if (!autoMemoryEnabled) return "";
+    const { fragment } = await getAutoMemoryFragment(projectId, 200, resolved.memoryPath);
+    return fragment;
+  };
+
   const initialPrompt = await loadPrompt(opts.prompt);
 
   if (resolved.dryRun) {
@@ -247,6 +304,10 @@ async function main(): Promise<void> {
     if (skillsLoaded?.length) {
       process.stderr.write(`[dry-run] skills: ${skillsLoaded.map((s) => `${s.path} (${s.charCount} chars)`).join(", ")}\n`);
     }
+    if (claudeMdLoaded?.length) {
+      process.stderr.write(`[dry-run] claude-md: ${claudeMdLoaded.map((c) => `${c.path} (${c.source})`).join(", ")}\n`);
+    }
+    process.stderr.write(`[dry-run] auto-memory: ${autoMemoryLoaded?.enabled ? `enabled, ${autoMemoryLoaded.lineCount} lines` : "disabled"}\n`);
     if (pluginsLoaded.length > 0) {
       process.stderr.write(`[dry-run] plugins: ${pluginsLoaded.map((p) => `${p.path} (${p.name})`).join(", ")}\n`);
     }
@@ -263,6 +324,12 @@ async function main(): Promise<void> {
   }
   if (resolved.verbose && skillsLoaded?.length) {
     process.stderr.write(`[verbose] skills loaded: ${skillsLoaded.map((s) => `${s.path} (${s.charCount} chars)`).join(", ")}\n`);
+  }
+  if (resolved.verbose && claudeMdLoaded?.length) {
+    process.stderr.write(`[verbose] claude-md loaded: ${claudeMdLoaded.map((c) => `${c.path} (${c.source}, ${c.lineCount ?? 0} lines)`).join("; ")}\n`);
+  }
+  if (resolved.verbose) {
+    process.stderr.write(`[verbose] auto-memory: ${autoMemoryLoaded?.enabled ? `enabled, ${autoMemoryLoaded.lineCount} lines` : "disabled"}\n`);
   }
   if (resolved.verbose && pluginsLoaded.length > 0) {
     process.stderr.write(`[verbose] plugins loaded: ${pluginsLoaded.map((p) => `${p.path} (${p.name})`).join(", ")}\n`);
@@ -301,6 +368,7 @@ async function main(): Promise<void> {
       ...(effectiveApproval === "prompt" && input.isTTY && {
         onApprovalRequest: buildApprovalHandler(approvalRl),
       }),
+      getMemoryFragment,
     };
     try {
       const result = await runOneTurn(loop, session, initialPrompt, runOpts, provider);
@@ -324,6 +392,8 @@ async function main(): Promise<void> {
         ...(skillsLoaded != null && skillsLoaded.length > 0 && { skillsLoaded }),
         ...(pluginsLoaded.length > 0 && { pluginsLoaded }),
         ...(mcpServersLoaded.length > 0 && { mcpServersLoaded }),
+        ...(claudeMdLoaded != null && claudeMdLoaded.length > 0 && { claudeMdLoaded }),
+        ...(autoMemoryLoaded != null && { autoMemoryLoaded }),
       });
       output.write(
         `sessionId=${sessionId} turns=${result.turns}, toolCalls=${result.toolCalls}, elapsed=${result.elapsedTotalMs}ms\ntranscript=${transcriptPath}\n`
@@ -344,6 +414,8 @@ async function main(): Promise<void> {
           ...(skillsLoaded != null && skillsLoaded.length > 0 && { skillsLoaded }),
           ...(pluginsLoaded.length > 0 && { pluginsLoaded }),
           ...(mcpServersLoaded.length > 0 && { mcpServersLoaded }),
+          ...(claudeMdLoaded != null && claudeMdLoaded.length > 0 && { claudeMdLoaded }),
+          ...(autoMemoryLoaded != null && { autoMemoryLoaded }),
         });
         await appendErrorLog(resolved.transcriptDir, {
           sessionId,
@@ -379,6 +451,7 @@ async function main(): Promise<void> {
     verbose: resolved.verbose,
     approvalMode: effectiveApproval,
     ...(effectiveApproval === "prompt" && input.isTTY && { onApprovalRequest: buildApprovalHandler(rl) }),
+    getMemoryFragment,
   };
 
   for (;;) {
@@ -414,6 +487,8 @@ async function main(): Promise<void> {
           ...(skillsLoaded != null && skillsLoaded.length > 0 && { skillsLoaded }),
           ...(pluginsLoaded.length > 0 && { pluginsLoaded }),
           ...(mcpServersLoaded.length > 0 && { mcpServersLoaded }),
+          ...(claudeMdLoaded != null && claudeMdLoaded.length > 0 && { claudeMdLoaded }),
+          ...(autoMemoryLoaded != null && { autoMemoryLoaded }),
         });
         await appendErrorLog(resolved.transcriptDir, {
           sessionId,
@@ -437,6 +512,8 @@ async function main(): Promise<void> {
     ...(skillsLoaded != null && skillsLoaded.length > 0 && { skillsLoaded }),
     ...(pluginsLoaded.length > 0 && { pluginsLoaded }),
     ...(mcpServersLoaded.length > 0 && { mcpServersLoaded }),
+    ...(claudeMdLoaded != null && claudeMdLoaded.length > 0 && { claudeMdLoaded }),
+    ...(autoMemoryLoaded != null && { autoMemoryLoaded }),
   });
   output.write(`sessionId=${sessionId} transcript=${transcriptPath}\n`);
   clearSessionId();

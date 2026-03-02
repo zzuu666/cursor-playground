@@ -70,6 +70,12 @@ export interface ConfigFile {
   pluginDirs?: string[];
   /** MCP 服务器配置（stdio / http），与 .mcp.json 格式一致。 */
   mcpServers?: Record<string, McpServerConfig>;
+  /** 是否启用 Auto Memory（MEMORY.md 前 200 行每会话加载）；默认 true。 */
+  autoMemoryEnabled?: boolean;
+  /** 排除的 CLAUDE.md 路径或前缀（大 monorepo 用）。 */
+  claudeMdExcludes?: string[];
+  /** 覆盖 Auto Memory 根目录（默认 ~/.claude）。 */
+  memoryPath?: string;
 }
 
 /** Resolved run config after merging defaults → config file → env → CLI. */
@@ -98,6 +104,12 @@ export interface ResolvedConfig {
   mcpServers?: Record<string, McpServerConfig>;
   /** 本次 run 启用的 MCP 服务器名称列表；未传 --mcp 时为 mcpServers 的全部 key。 */
   enabledMcpServerNames?: string[];
+  /** 是否启用 Auto Memory；默认 true，可由 MINI_AGENT_DISABLE_AUTO_MEMORY=1 关闭。 */
+  autoMemoryEnabled?: boolean;
+  /** 排除的 CLAUDE.md 路径或前缀。 */
+  claudeMdExcludes?: string[];
+  /** 覆盖 Auto Memory 根目录。 */
+  memoryPath?: string;
 }
 
 export interface MinimaxConfig {
@@ -121,7 +133,21 @@ export interface LoadConfigOptions {
   defaultTranscriptDir?: string;
   /** CLI overrides (highest priority). */
   cli?: Partial<
-    Pick<ResolvedConfig, "provider" | "model" | "transcriptDir" | "approval" | "verbose" | "dryRun" | "skillPaths" | "pluginDirs" | "enabledMcpServerNames"> & {
+    Pick<
+      ResolvedConfig,
+      | "provider"
+      | "model"
+      | "transcriptDir"
+      | "approval"
+      | "verbose"
+      | "dryRun"
+      | "skillPaths"
+      | "pluginDirs"
+      | "enabledMcpServerNames"
+      | "autoMemoryEnabled"
+      | "claudeMdExcludes"
+      | "memoryPath"
+    > & {
       policy?: Partial<LoopPolicy>;
     }
   >;
@@ -224,6 +250,13 @@ async function readConfigFile(filePath: string): Promise<ConfigFile> {
     }
     if (Object.keys(mcpServers).length > 0) config.mcpServers = mcpServers;
   }
+  if (typeof obj.autoMemoryEnabled === "boolean") config.autoMemoryEnabled = obj.autoMemoryEnabled;
+  if (Array.isArray(obj.claudeMdExcludes)) {
+    const list = (obj.claudeMdExcludes as unknown[]).filter((x): x is string => typeof x === "string");
+    if (list.length > 0) config.claudeMdExcludes = list;
+  }
+  if (typeof obj.memoryPath === "string" && obj.memoryPath.trim())
+    config.memoryPath = resolveTilde(obj.memoryPath.trim());
   return config;
 }
 
@@ -315,6 +348,7 @@ export async function loadConfig(options: LoadConfigOptions): Promise<ResolvedCo
     dryRun: false,
     globalSkillDirs: getDefaultGlobalSkillDirs(),
     skipGlobalSkills: false,
+    autoMemoryEnabled: true,
   };
 
   let merged: ResolvedConfig = { ...defaults, policy: { ...defaults.policy } };
@@ -343,6 +377,9 @@ export async function loadConfig(options: LoadConfigOptions): Promise<ResolvedCo
         merged.mcpServers[name] = expandMcpServerConfig(cfg);
       }
     }
+    if (fileConfig.autoMemoryEnabled != null) merged.autoMemoryEnabled = fileConfig.autoMemoryEnabled;
+    if (fileConfig.claudeMdExcludes != null) merged.claudeMdExcludes = [...fileConfig.claudeMdExcludes];
+    if (fileConfig.memoryPath != null) merged.memoryPath = fileConfig.memoryPath;
   }
 
   const projectMcp = await readProjectMcpJson(cwd);
@@ -365,6 +402,10 @@ export async function loadConfig(options: LoadConfigOptions): Promise<ResolvedCo
   const envSkipGlobal = process.env.MINI_AGENT_SKIP_GLOBAL_SKILLS?.trim();
   if (envSkipGlobal && envSkipGlobal !== "0" && envSkipGlobal.toLowerCase() !== "false") {
     merged.skipGlobalSkills = true;
+  }
+  const envDisableAutoMemory = process.env.MINI_AGENT_DISABLE_AUTO_MEMORY?.trim();
+  if (envDisableAutoMemory && envDisableAutoMemory !== "0" && envDisableAutoMemory.toLowerCase() !== "false") {
+    merged.autoMemoryEnabled = false;
   }
 
   const envBaseURL = process.env.MINIMAX_BASE_URL?.trim();
@@ -392,6 +433,11 @@ export async function loadConfig(options: LoadConfigOptions): Promise<ResolvedCo
   } else if (merged.mcpServers != null && Object.keys(merged.mcpServers).length > 0) {
     merged.enabledMcpServerNames = Object.keys(merged.mcpServers);
   }
+  if (cli.autoMemoryEnabled != null) merged.autoMemoryEnabled = cli.autoMemoryEnabled;
+  if (cli.claudeMdExcludes != null) {
+    merged.claudeMdExcludes = [...(merged.claudeMdExcludes ?? []), ...cli.claudeMdExcludes];
+  }
+  if (cli.memoryPath != null) merged.memoryPath = resolveTilde(cli.memoryPath);
 
   return merged;
 }

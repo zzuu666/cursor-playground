@@ -57,6 +57,8 @@ export interface RunOptions {
     toolName: string,
     inputSummary: string
   ) => Promise<{ approved: boolean; reason?: string }>;
+  /** 每轮调用 LLM 前获取 Auto Memory 片段，非空时 prepend 为一条 user 消息。 */
+  getMemoryFragment?: () => Promise<string>;
 }
 
 export class AgentLoop {
@@ -90,6 +92,7 @@ export class AgentLoop {
         ? { onText: options.onStreamText }
         : {};
     const verbose = options.verbose === true;
+    const getMemoryFragment = options.getMemoryFragment;
 
     while (turns < this.policy.maxTurns) {
       turns += 1;
@@ -99,14 +102,20 @@ export class AgentLoop {
       );
       const startTime = Date.now();
 
+      const baseMessages = session.getMessages();
+      const memoryFragment = await (getMemoryFragment?.() ?? Promise.resolve(""));
+      const messages =
+        memoryFragment.trim().length > 0
+          ? [{ role: "user" as const, content: memoryFragment }, ...baseMessages]
+          : baseMessages;
+
       if (verbose) {
-        const msgCount = session.getMessages().length;
-        process.stderr.write(`[verbose] turn ${turns} request: ${msgCount} messages\n`);
+        process.stderr.write(`[verbose] turn ${turns} request: ${messages.length} messages\n`);
       }
       if (useStream) logStreamTurn(turns, "start");
       const blocks = useStream
-        ? await this.provider.streamComplete!(session.getMessages(), streamCallbacks)
-        : await this.provider.complete(session.getMessages());
+        ? await this.provider.streamComplete!(messages, streamCallbacks)
+        : await this.provider.complete(messages);
       session.addAssistantBlocks(blocks);
       if (useStream) logStreamTurn(turns, "end");
       if (verbose) {
