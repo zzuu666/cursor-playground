@@ -36,7 +36,7 @@ import { createMemoryWriteTool } from "./tools/memory-write.js";
 import { ToolRegistry } from "./tools/registry.js";
 import { SYSTEM_PROMPT } from "./prompts/system.js";
 import { findClaudeMdPaths, loadClaudeMdContent, mergeAndTag } from "./memory/claude-md.js";
-import { getProjectId, getAutoMemoryFragment } from "./memory/auto-memory.js";
+import { appendToMemoryMd, getProjectId, getAutoMemoryFragment } from "./memory/auto-memory.js";
 
 async function readFromStdin(): Promise<string> {
   const chunks: Buffer[] = [];
@@ -63,6 +63,8 @@ type RunOneTurnOpts = {
   approvalMode: ResolvedConfig["approval"];
   onApprovalRequest?: (toolName: string, inputSummary: string) => Promise<{ approved: boolean; reason?: string }>;
   getMemoryFragment?: () => Promise<string>;
+  /** Phase 13: 压缩前将规则摘要写入 Auto Memory。 */
+  onBeforeCompress?: (removed: import("./agent/session.js").ConversationMessage[], ruleSummaryText: string) => Promise<void>;
 };
 
 function runOneTurn(
@@ -78,6 +80,7 @@ function runOneTurn(
     ...(opts.onApprovalRequest != null && { onApprovalRequest: opts.onApprovalRequest }),
     ...(opts.stream && provider.streamComplete && { onStreamText: (delta: string) => output.write(delta) }),
     ...(opts.getMemoryFragment != null && { getMemoryFragment: opts.getMemoryFragment }),
+    ...(opts.onBeforeCompress != null && { onBeforeCompress: opts.onBeforeCompress }),
   };
   return loop.run(session, prompt, runOptions);
 }
@@ -123,6 +126,10 @@ async function main(): Promise<void> {
     .option("--no-auto-memory", "disable Auto Memory (MEMORY.md injection)")
     .option("--claude-md-exclude <paths...>", "path(s) or prefix(es) to exclude from CLAUDE.md loading")
     .option("--memory-path <path>", "override Auto Memory root directory (default: ~/.claude)")
+    .option("--context-max-tokens <n>", "Phase 13: max context tokens before compress (token_based strategy)")
+    .option("--compress-strategy <s>", "Phase 13: message_count | token_based", "message_count")
+    .option("--use-llm-summary", "Phase 13: use LLM for context compression summary (fallback to rule)")
+    .option("--compress-write-memory", "Phase 13: write rule summary to Auto Memory before compressing")
     .addHelpText(
       "after",
       "\nExample:\n  mini-agent --provider mock --prompt \"hello\"\n  mini-agent --provider deepseek --approval prompt --prompt \"write a ts file\"\n"
@@ -145,6 +152,10 @@ async function main(): Promise<void> {
     autoMemory?: boolean;
     claudeMdExclude?: string[];
     memoryPath?: string;
+    contextMaxTokens?: string;
+    compressStrategy?: string;
+    useLlmSummary?: boolean;
+    compressWriteMemory?: boolean;
   }>();
 
   const cliMcpNames = Array.isArray(opts.mcp) ? opts.mcp : typeof opts.mcp === "string" ? [opts.mcp] : [];
@@ -175,6 +186,17 @@ async function main(): Promise<void> {
         : [];
     if (cliClaudeMdExclude.length > 0) cliOverrides.claudeMdExcludes = cliClaudeMdExclude;
     if (opts.memoryPath != null) cliOverrides.memoryPath = opts.memoryPath;
+    const policyOverrides: Partial<ResolvedConfig["policy"]> = {};
+    if (opts.contextMaxTokens != null) {
+      const n = parseInt(opts.contextMaxTokens, 10);
+      if (!Number.isNaN(n) && n >= 0) policyOverrides.contextMaxTokens = n;
+    }
+    if (opts.compressStrategy === "token_based" || opts.compressStrategy === "message_count") {
+      policyOverrides.compressStrategy = opts.compressStrategy;
+    }
+    if (opts.useLlmSummary === true) policyOverrides.useLlmSummary = true;
+    if (opts.compressWriteMemory === true) policyOverrides.compressWriteMemory = true;
+    if (Object.keys(policyOverrides).length > 0) cliOverrides.policy = policyOverrides;
     const cliPackageRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
     resolved = await loadConfig({
       ...(opts.config != null && { configPath: opts.config }),
@@ -358,6 +380,20 @@ async function main(): Promise<void> {
   const sessionId = createSessionId();
   setSessionId(sessionId);
 
+  const onBeforeCompress =
+    resolved.policy.compressWriteMemory && autoMemoryEnabled
+      ? async (
+          _removed: import("./agent/session.js").ConversationMessage[],
+          summary: string
+        ) => {
+            await appendToMemoryMd(
+              projectId,
+              `[Context compression ${new Date().toISOString()}]: ${summary}\n`,
+              resolved.memoryPath
+            );
+          }
+      : undefined;
+
   if (initialPrompt != null) {
     const approvalRl =
       effectiveApproval === "prompt" && input.isTTY ? createInterface({ input, output }) : null;
@@ -369,6 +405,7 @@ async function main(): Promise<void> {
         onApprovalRequest: buildApprovalHandler(approvalRl),
       }),
       getMemoryFragment,
+      ...(onBeforeCompress != null && { onBeforeCompress }),
     };
     try {
       const result = await runOneTurn(loop, session, initialPrompt, runOpts, provider);
@@ -389,6 +426,9 @@ async function main(): Promise<void> {
           elapsedTotalMs: result.elapsedTotalMs,
         },
         ...(result.approvalLog.length > 0 && { approvalLog: result.approvalLog }),
+        ...(result.contextCompressEvents != null && result.contextCompressEvents.length > 0 && {
+          contextCompressEvents: result.contextCompressEvents,
+        }),
         ...(skillsLoaded != null && skillsLoaded.length > 0 && { skillsLoaded }),
         ...(pluginsLoaded.length > 0 && { pluginsLoaded }),
         ...(mcpServersLoaded.length > 0 && { mcpServersLoaded }),
@@ -452,6 +492,7 @@ async function main(): Promise<void> {
     approvalMode: effectiveApproval,
     ...(effectiveApproval === "prompt" && input.isTTY && { onApprovalRequest: buildApprovalHandler(rl) }),
     getMemoryFragment,
+    ...(onBeforeCompress != null && { onBeforeCompress }),
   };
 
   for (;;) {

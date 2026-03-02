@@ -223,6 +223,12 @@ async function readConfigFile(filePath: string): Promise<ConfigFile> {
     if (typeof p.maxSameToolRepeat === "number") config.policy.maxSameToolRepeat = p.maxSameToolRepeat;
     if (typeof p.summaryThreshold === "number") config.policy.summaryThreshold = p.summaryThreshold;
     if (typeof p.summaryKeepRecent === "number") config.policy.summaryKeepRecent = p.summaryKeepRecent;
+    if (typeof p.contextMaxTokens === "number") config.policy.contextMaxTokens = p.contextMaxTokens;
+    if (p.compressStrategy === "message_count" || p.compressStrategy === "token_based") config.policy.compressStrategy = p.compressStrategy;
+    if (typeof p.useLlmSummary === "boolean") config.policy.useLlmSummary = p.useLlmSummary;
+    if (typeof p.compressWriteMemory === "boolean") config.policy.compressWriteMemory = p.compressWriteMemory;
+    if (typeof p.llmSummaryTimeoutMs === "number") config.policy.llmSummaryTimeoutMs = p.llmSummaryTimeoutMs;
+    if (typeof p.llmSummaryMaxInputChars === "number") config.policy.llmSummaryMaxInputChars = p.llmSummaryMaxInputChars;
   }
   if (Array.isArray(obj.allowedCommands)) {
     const list = (obj.allowedCommands as unknown[]).filter((x): x is string => typeof x === "string");

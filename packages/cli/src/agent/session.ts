@@ -35,6 +35,30 @@ export type ConversationMessage =
       content: AssistantContentBlock[];
     };
 
+/** Phase 13: 根据被移除的消息生成规则摘要，供压缩与 onBeforeCompress 使用。 */
+export function ruleSummary(removed: ConversationMessage[]): string {
+  let userTurns = 0;
+  let toolCalls = 0;
+  let firstUserIntent = "";
+  for (const msg of removed) {
+    if (msg.role === "user") {
+      if (typeof msg.content === "string") {
+        userTurns += 1;
+        if (!firstUserIntent && msg.content.trim()) {
+          firstUserIntent = msg.content.trim().slice(0, 200);
+          if (msg.content.length > 200) firstUserIntent += "...";
+        }
+      } else {
+        const hasToolResult = msg.content.some((b) => b.type === "tool_result");
+        if (hasToolResult) toolCalls += 1;
+      }
+    }
+  }
+  return firstUserIntent
+    ? `[Earlier conversation: ${userTurns} user turn(s), ${toolCalls} tool result(s). First user input: "${firstUserIntent}"]`
+    : `[Earlier conversation: ${userTurns} user turn(s), ${toolCalls} tool result(s).]`;
+}
+
 export class AgentSession {
   private readonly messages: ConversationMessage[] = [];
 
@@ -87,40 +111,31 @@ export class AgentSession {
   }
 
   /**
-   * When messages exceed threshold, replace early messages with a single
-   * rule-based summary. Keeps the most recent keepRecent messages.
+   * When messages exceed threshold, replace early messages with a single summary.
+   * Keeps the most recent keepRecent messages. Phase 13: async, optional getSummary for LLM summary.
    * 压缩后会丢弃「孤儿」tool_result：其 tool_use_id 在保留的 assistant 中已不存在，避免 API 报 2013。
    */
-  compressToSummary(threshold: number, keepRecent: number): void {
+  async compressToSummary(
+    threshold: number,
+    keepRecent: number,
+    options?: { getSummary?: (removed: ConversationMessage[]) => Promise<string> }
+  ): Promise<void> {
     if (this.messages.length <= threshold) return;
 
     const toRemove = this.messages.length - keepRecent;
     if (toRemove <= 0) return;
 
     const removed = this.messages.splice(0, toRemove);
-    let userTurns = 0;
-    let toolCalls = 0;
-    let firstUserIntent = "";
-
-    for (const msg of removed) {
-      if (msg.role === "user") {
-        if (typeof msg.content === "string") {
-          userTurns += 1;
-          if (!firstUserIntent && msg.content.trim()) {
-            firstUserIntent = msg.content.trim().slice(0, 200);
-            if (msg.content.length > 200) firstUserIntent += "...";
-          }
-        } else {
-          const hasToolResult = msg.content.some((b) => b.type === "tool_result");
-          if (hasToolResult) toolCalls += 1;
-        }
+    let summary: string;
+    if (options?.getSummary) {
+      try {
+        summary = await options.getSummary(removed);
+      } catch {
+        summary = ruleSummary(removed);
       }
+    } else {
+      summary = ruleSummary(removed);
     }
-
-    const summary =
-      firstUserIntent
-        ? `[Earlier conversation: ${userTurns} user turn(s), ${toolCalls} tool result(s). First user input: "${firstUserIntent}"]`
-        : `[Earlier conversation: ${userTurns} user turn(s), ${toolCalls} tool result(s).]`;
 
     this.messages.unshift({
       role: "user",

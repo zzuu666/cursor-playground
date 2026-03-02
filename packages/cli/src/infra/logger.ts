@@ -63,12 +63,27 @@ function redactObject(obj: unknown): unknown {
   return out;
 }
 
+/** Phase 13: 单次上下文压缩事件。 */
+export interface TranscriptContextCompressEvent {
+  atTurn: number;
+  estimatedTokens: number;
+  strategy: "rule" | "llm";
+  memoryWritten: boolean;
+}
+
 export interface TranscriptResult {
   turns: number;
   toolCalls: number;
-  diagnostics: Array<{ turn: number; toolCount: number; elapsedMs: number }>;
+  diagnostics: Array<{
+    turn: number;
+    toolCount: number;
+    elapsedMs: number;
+    /** Phase 13: 当轮估算 token 数。 */
+    estimatedTokens?: number;
+  }>;
   elapsedTotalMs: number;
 }
+
 
 /** 记录到 transcript 的终止错误，便于审计与排查。 */
 export interface TranscriptError {
@@ -112,6 +127,8 @@ export interface TranscriptPayload {
   claudeMdLoaded?: { path: string; source: "project" | "user" | "local"; lineCount?: number }[];
   /** 本次 run Auto Memory 加载情况：是否启用、MEMORY.md 行数等（Phase 12）。 */
   autoMemoryLoaded?: { enabled: boolean; lineCount: number; path?: string };
+  /** Phase 13: 本次 run 触发的上下文压缩事件。 */
+  contextCompressEvents?: TranscriptContextCompressEvent[];
 }
 
 /** 独立 error 日志单条，写入 errors.jsonl。 */

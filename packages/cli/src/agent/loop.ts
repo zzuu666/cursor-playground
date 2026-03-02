@@ -5,8 +5,13 @@ import { logStreamTurn, logToolCall, logTurnDiagnostics } from "../infra/logger.
 import type { ChatProvider } from "../providers/base.js";
 import type { ToolRegistry } from "../tools/registry.js";
 import { DEFAULT_LOOP_POLICY, type LoopPolicy } from "./policy.js";
-import type { AssistantContentBlock, ToolUseBlock } from "./session.js";
-import { AgentSession } from "./session.js";
+import type {
+  AssistantContentBlock,
+  ConversationMessage,
+  ToolUseBlock,
+} from "./session.js";
+import { AgentSession, ruleSummary } from "./session.js";
+import { estimateTokens } from "./token-estimate.js";
 
 const INPUT_SUMMARY_MAX = 200;
 
@@ -30,10 +35,42 @@ function toolCallFingerprint(name: string, input: Record<string, unknown>): stri
   return `${name}|${JSON.stringify(sorted)}`;
 }
 
+/** Phase 13: 将 messages 序列化为给 LLM 摘要用的文本，并截断到 maxChars。 */
+function serializeForSummary(messages: ConversationMessage[], maxChars: number): string {
+  const parts: string[] = [];
+  let len = 0;
+  for (const msg of messages) {
+    let s: string;
+    if (msg.role === "user") {
+      s = typeof msg.content === "string" ? msg.content : JSON.stringify(msg.content);
+    } else {
+      s = msg.content.map((b) => (b.type === "text" ? b.text : b.type === "thinking" ? b.thinking : JSON.stringify(b))).join("\n");
+    }
+    const line = `[${msg.role}]: ${s.slice(0, 2000)}${s.length > 2000 ? "..." : ""}\n`;
+    if (len + line.length > maxChars) {
+      parts.push(line.slice(0, maxChars - len));
+      break;
+    }
+    parts.push(line);
+    len += line.length;
+  }
+  return parts.join("");
+}
+
 export interface TurnDiagnostic {
   turn: number;
   toolCount: number;
   elapsedMs: number;
+  /** Phase 13: 当轮发给 LLM 的 messages 估算 token 数。 */
+  estimatedTokens?: number;
+}
+
+/** Phase 13: 单次上下文压缩事件。 */
+export interface ContextCompressEvent {
+  atTurn: number;
+  estimatedTokens: number;
+  strategy: "rule" | "llm";
+  memoryWritten: boolean;
 }
 
 export interface LoopResult {
@@ -44,6 +81,8 @@ export interface LoopResult {
   elapsedTotalMs: number;
   /** 本次 run 内发生的工具批准/拒绝记录。 */
   approvalLog: ApprovalLogEntry[];
+  /** Phase 13: 本次 run 内触发的上下文压缩事件。 */
+  contextCompressEvents?: ContextCompressEvent[];
 }
 
 export interface RunOptions {
@@ -59,6 +98,11 @@ export interface RunOptions {
   ) => Promise<{ approved: boolean; reason?: string }>;
   /** 每轮调用 LLM 前获取 Auto Memory 片段，非空时 prepend 为一条 user 消息。 */
   getMemoryFragment?: () => Promise<string>;
+  /** Phase 13: 压缩前将规则摘要写入 Memory 时调用。 */
+  onBeforeCompress?: (
+    removed: ConversationMessage[],
+    ruleSummaryText: string
+  ) => Promise<void>;
 }
 
 export class AgentLoop {
@@ -93,24 +137,94 @@ export class AgentLoop {
         : {};
     const verbose = options.verbose === true;
     const getMemoryFragment = options.getMemoryFragment;
+    const onBeforeCompress = options.onBeforeCompress;
+    const contextCompressEvents: ContextCompressEvent[] = [];
 
     while (turns < this.policy.maxTurns) {
       turns += 1;
-      session.compressToSummary(
-        this.policy.summaryThreshold,
-        this.policy.summaryKeepRecent
-      );
       const startTime = Date.now();
 
-      const baseMessages = session.getMessages();
+      let baseMessages = session.getMessages();
       const memoryFragment = await (getMemoryFragment?.() ?? Promise.resolve(""));
-      const messages =
+      let messages =
+        memoryFragment.trim().length > 0
+          ? [{ role: "user" as const, content: memoryFragment }, ...baseMessages]
+          : baseMessages;
+
+      const estimatedTokens = estimateTokens(messages);
+      const tokenTrigger =
+        this.policy.compressStrategy === "token_based" &&
+        this.policy.contextMaxTokens > 0 &&
+        estimatedTokens > this.policy.contextMaxTokens;
+      const countTrigger =
+        this.policy.compressStrategy === "message_count" &&
+        baseMessages.length > this.policy.summaryThreshold;
+      const shouldCompress = tokenTrigger || countTrigger;
+
+      if (shouldCompress) {
+        const toRemove = baseMessages.length - this.policy.summaryKeepRecent;
+        if (toRemove > 0) {
+          const removed = baseMessages.slice(0, toRemove);
+          const ruleSummaryText = ruleSummary(removed);
+          if (onBeforeCompress) {
+            await onBeforeCompress(removed, ruleSummaryText);
+          }
+          const getSummary = this.policy.useLlmSummary
+            ? (removedMsgs: ConversationMessage[]): Promise<string> => {
+                const prompt =
+                  "Summarize the following conversation in one short paragraph, preserving user intent and key conclusions:\n\n" +
+                  serializeForSummary(
+                    removedMsgs,
+                    this.policy.llmSummaryMaxInputChars
+                  );
+                return new Promise((resolve, reject) => {
+                  const t = setTimeout(() => {
+                    reject(new Error("LLM summary timeout"));
+                  }, this.policy.llmSummaryTimeoutMs);
+                  this.provider
+                    .complete([{ role: "user", content: prompt }])
+                    .then((blks) => {
+                      clearTimeout(t);
+                      resolve(getTextFromBlocks(blks).trim() || ruleSummary(removedMsgs));
+                    })
+                    .catch((err) => {
+                      clearTimeout(t);
+                      reject(err);
+                    });
+                });
+              }
+            : undefined;
+          await session.compressToSummary(
+            this.policy.summaryThreshold,
+            this.policy.summaryKeepRecent,
+            getSummary != null ? { getSummary } : undefined
+          );
+          contextCompressEvents.push({
+            atTurn: turns,
+            estimatedTokens,
+            strategy: this.policy.useLlmSummary ? "llm" : "rule",
+            memoryWritten: onBeforeCompress != null,
+          });
+          if (verbose) {
+            process.stderr.write(
+              `[verbose] context compressed at turn ${turns}, strategy=${this.policy.useLlmSummary ? "llm" : "rule"}, memoryWritten=${onBeforeCompress != null}\n`
+            );
+          }
+        }
+      } else if (this.policy.compressStrategy === "message_count") {
+        await session.compressToSummary(
+          this.policy.summaryThreshold,
+          this.policy.summaryKeepRecent
+        );
+      }
+      baseMessages = session.getMessages();
+      messages =
         memoryFragment.trim().length > 0
           ? [{ role: "user" as const, content: memoryFragment }, ...baseMessages]
           : baseMessages;
 
       if (verbose) {
-        process.stderr.write(`[verbose] turn ${turns} request: ${messages.length} messages\n`);
+        process.stderr.write(`[verbose] turn ${turns} request: ${messages.length} messages, estimated tokens: ${estimatedTokens}\n`);
       }
       if (useStream) logStreamTurn(turns, "start");
       const blocks = useStream
@@ -128,7 +242,12 @@ export class AgentLoop {
       );
       if (toolUseBlocks.length === 0) {
         const elapsedMs = Date.now() - startTime;
-        diagnostics.push({ turn: turns, toolCount: toolCalls, elapsedMs });
+        diagnostics.push({
+          turn: turns,
+          toolCount: toolCalls,
+          elapsedMs,
+          estimatedTokens,
+        });
         logTurnDiagnostics(turns, toolCalls, elapsedMs);
         return {
           finalText: getTextFromBlocks(blocks),
@@ -137,6 +256,7 @@ export class AgentLoop {
           diagnostics,
           elapsedTotalMs: Date.now() - runStartTime,
           approvalLog,
+          ...(contextCompressEvents.length > 0 && { contextCompressEvents }),
         };
       }
 
@@ -258,7 +378,12 @@ export class AgentLoop {
       }
 
       const elapsedMs = Date.now() - startTime;
-      diagnostics.push({ turn: turns, toolCount: toolCalls, elapsedMs });
+      diagnostics.push({
+        turn: turns,
+        toolCount: toolCalls,
+        elapsedMs,
+        estimatedTokens,
+      });
       logTurnDiagnostics(turns, toolCalls, elapsedMs);
     }
 
