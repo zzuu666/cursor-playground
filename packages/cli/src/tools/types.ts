@@ -14,6 +14,8 @@ export interface Tool {
   inputSchema: ToolInputSchema;
   /** 为 true 时，在 approval 策略为 prompt 时会等待用户批准；never 时直接拒绝。 */
   requiresApproval?: boolean;
+  /** 为 true 时在 Plan 模式下可用；只读、不改变工作区或外部状态。 */
+  readOnly?: boolean;
   execute(args: Record<string, unknown>): Promise<string>;
 }
 

@@ -10,6 +10,7 @@ const argsSchema = z.object({
 export function createGlobSearchTool(cwd: string): Tool {
   return {
     name: "glob_search",
+    readOnly: true,
     description:
       "Search for files matching a glob pattern (e.g. '*.ts', 'src/**/*.ts'). Pattern is resolved inside the workspace only. Returns a list of relative paths, one per line.",
     inputSchema: {

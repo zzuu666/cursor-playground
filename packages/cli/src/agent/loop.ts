@@ -1,5 +1,7 @@
-import type { ApprovalMode } from "../config.js";
+import type { AgentMode, ApprovalMode } from "../config.js";
+import { AGENT_MODE } from "../config.js";
 import { LoopLimitError, LoopSpinDetectedError } from "../infra/errors.js";
+import { PLAN_MODE_SYSTEM_SUFFIX } from "../prompts/system.js";
 import type { ApprovalLogEntry } from "../infra/logger.js";
 import { logStreamTurn, logToolCall, logTurnDiagnostics } from "../infra/logger.js";
 import type { ChatProvider } from "../providers/base.js";
@@ -37,7 +39,7 @@ function toolCallFingerprint(name: string, input: Record<string, unknown>): stri
 
 /** Phase 13: 将 messages 序列化为给 LLM 摘要用的文本，并截断到 maxChars。 */
 function serializeForSummary(messages: ConversationMessage[], maxChars: number): string {
-  const parts: string[] = [];
+  const parts: string[] = [];3
   let len = 0;
   for (const msg of messages) {
     let s: string;
@@ -103,6 +105,8 @@ export interface RunOptions {
     removed: ConversationMessage[],
     ruleSummaryText: string
   ) => Promise<void>;
+  /** 运行模式：agent 全工具，plan 仅只读工具。 */
+  mode?: AgentMode;
 }
 
 export class AgentLoop {
@@ -139,6 +143,13 @@ export class AgentLoop {
     const getMemoryFragment = options.getMemoryFragment;
     const onBeforeCompress = options.onBeforeCompress;
     const contextCompressEvents: ContextCompressEvent[] = [];
+    const mode: AgentMode = options.mode ?? AGENT_MODE.Agent;
+    const effectiveTools =
+      mode === AGENT_MODE.Plan && this.registry
+        ? this.registry.listReadOnly()
+        : this.registry
+          ? this.registry.list()
+          : [];
 
     while (turns < this.policy.maxTurns) {
       turns += 1;
@@ -227,9 +238,13 @@ export class AgentLoop {
         process.stderr.write(`[verbose] turn ${turns} request: ${messages.length} messages, estimated tokens: ${estimatedTokens}\n`);
       }
       if (useStream) logStreamTurn(turns, "start");
+      const completeOptions = {
+        tools: effectiveTools,
+        ...(mode === AGENT_MODE.Plan && { systemPromptSuffix: PLAN_MODE_SYSTEM_SUFFIX }),
+      };
       const blocks = useStream
-        ? await this.provider.streamComplete!(messages, streamCallbacks)
-        : await this.provider.complete(messages);
+        ? await this.provider.streamComplete!(messages, streamCallbacks, completeOptions)
+        : await this.provider.complete(messages, completeOptions);
       session.addAssistantBlocks(blocks);
       if (useStream) logStreamTurn(turns, "end");
       if (verbose) {

@@ -10,6 +10,7 @@ const argsSchema = z.object({
 export function createReadFileTool(cwd: string): Tool {
   return {
     name: "read_file",
+    readOnly: true,
     description:
       "Read the contents of a text file. Path is relative to the workspace (current working directory). Only paths inside the workspace are allowed (no '..' or absolute paths outside cwd).",
     inputSchema: {

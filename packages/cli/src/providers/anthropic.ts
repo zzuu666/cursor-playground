@@ -7,8 +7,8 @@ import type {
 } from "../agent/session.js";
 import { retryWithBackoff } from "../infra/retry.js";
 import { SYSTEM_PROMPT } from "../prompts/system.js";
-import type { ChatProvider, StreamCallbacks } from "./base.js";
-import type { ToolInputSchema } from "../tools/types.js";
+import type { CompleteOptions, ChatProvider, StreamCallbacks } from "./base.js";
+import type { Tool, ToolInputSchema } from "../tools/types.js";
 
 export interface AnthropicToolSpec {
   name: string;
@@ -101,6 +101,17 @@ function fromAnthropicContent(
   return out;
 }
 
+function toolsToAnthropicSpec(tools: AnthropicToolSpec[] | Tool[]): AnthropicToolSpec[] {
+  if (tools.length === 0) return [];
+  const first = tools[0]!;
+  if ("input_schema" in first) return tools as AnthropicToolSpec[];
+  return (tools as Tool[]).map((t) => ({
+    name: t.name,
+    description: t.description,
+    input_schema: t.inputSchema,
+  }));
+}
+
 export class AnthropicProvider implements ChatProvider {
   readonly name = "anthropic-compatible";
   private readonly client: Anthropic;
@@ -123,20 +134,25 @@ export class AnthropicProvider implements ChatProvider {
   }
 
   async complete(
-    messages: ConversationMessage[]
+    messages: ConversationMessage[],
+    options?: CompleteOptions
   ): Promise<AssistantContentBlock[]> {
+    const tools = toolsToAnthropicSpec(options?.tools ?? this.tools);
+    const systemPrompt =
+      this.systemPrompt +
+      (options?.systemPromptSuffix ? "\n\n" + options.systemPromptSuffix : "");
     return retryWithBackoff(
       async () => {
         const anthropicMessages = toAnthropicMessages(messages);
         const base = {
           model: this.model as "claude-3-5-sonnet-20241022",
           max_tokens: MAX_TOKENS,
-          system: this.systemPrompt,
+          system: systemPrompt,
           messages: anthropicMessages as Parameters<Anthropic["messages"]["create"]>[0]["messages"],
         };
         type CreateParams = Parameters<Anthropic["messages"]["create"]>[0];
         const createBody: CreateParams =
-          this.tools.length > 0 ? { ...base, tools: this.tools as NonNullable<CreateParams["tools"]> } : base;
+          tools.length > 0 ? { ...base, tools: tools as NonNullable<CreateParams["tools"]> } : base;
         const response = await this.client.messages.create(createBody);
 
         const content = (response as { content?: Array<{ type: string; text?: string; thinking?: string; id?: string; name?: string; input?: unknown }> }).content;
@@ -151,20 +167,25 @@ export class AnthropicProvider implements ChatProvider {
 
   async streamComplete(
     messages: ConversationMessage[],
-    callbacks: StreamCallbacks
+    callbacks: StreamCallbacks,
+    options?: CompleteOptions
   ): Promise<AssistantContentBlock[]> {
+    const tools = toolsToAnthropicSpec(options?.tools ?? this.tools);
+    const systemPrompt =
+      this.systemPrompt +
+      (options?.systemPromptSuffix ? "\n\n" + options.systemPromptSuffix : "");
     return retryWithBackoff(
       async () => {
         const anthropicMessages = toAnthropicMessages(messages);
         const base = {
           model: this.model as "claude-3-5-sonnet-20241022",
           max_tokens: MAX_TOKENS,
-          system: this.systemPrompt,
+          system: systemPrompt,
           messages: anthropicMessages as Parameters<Anthropic["messages"]["stream"]>[0]["messages"],
         };
         type StreamParams = Parameters<Anthropic["messages"]["stream"]>[0];
         const streamBody: StreamParams =
-          this.tools.length > 0 ? { ...base, tools: this.tools as NonNullable<StreamParams["tools"]> } : base;
+          tools.length > 0 ? { ...base, tools: tools as NonNullable<StreamParams["tools"]> } : base;
         const stream = this.client.messages.stream(streamBody);
         if (callbacks.onText) {
           stream.on("text", (delta: string) => {

@@ -29,6 +29,25 @@ function parseApprovalMode(value: unknown): ApprovalMode | undefined {
   return undefined;
 }
 
+/** 集中定义 Agent 模式所有合法取值，便于统一维护。 */
+export const AGENT_MODE = {
+  Agent: "agent",
+  Plan: "plan",
+} as const;
+
+/** Agent 运行模式：agent 全工具执行，plan 仅只读工具、产出计划。 */
+export type AgentMode = (typeof AGENT_MODE)[keyof typeof AGENT_MODE];
+
+const AGENT_MODES = Object.values(AGENT_MODE) as AgentMode[];
+const DEFAULT_AGENT_MODE: AgentMode = AGENT_MODE.Agent;
+
+function parseAgentMode(value: unknown): AgentMode | undefined {
+  if (typeof value !== "string") return undefined;
+  const s = value.trim().toLowerCase();
+  if (AGENT_MODES.includes(s as AgentMode)) return s as AgentMode;
+  return undefined;
+}
+
 /** MCP 服务配置：stdio（本地进程）或 http（远程），与 Claude Code / .mcp.json 兼容。 */
 export interface McpServerConfigStdio {
   type?: "stdio";
@@ -76,6 +95,8 @@ export interface ConfigFile {
   claudeMdExcludes?: string[];
   /** 覆盖 Auto Memory 根目录（默认 ~/.claude）。 */
   memoryPath?: string;
+  /** 默认运行模式：agent | plan。 */
+  defaultMode?: AgentMode;
 }
 
 /** Resolved run config after merging defaults → config file → env → CLI. */
@@ -86,6 +107,8 @@ export interface ResolvedConfig {
   baseURL: string;
   policy: LoopPolicy;
   approval: ApprovalMode;
+  /** Agent 运行模式：agent 全工具，plan 仅只读。 */
+  mode: AgentMode;
   verbose: boolean;
   dryRun: boolean;
   /** 仅来自配置文件；不设则工具使用内置默认白名单。 */
@@ -139,6 +162,7 @@ export interface LoadConfigOptions {
       | "model"
       | "transcriptDir"
       | "approval"
+      | "mode"
       | "verbose"
       | "dryRun"
       | "skillPaths"
@@ -263,6 +287,8 @@ async function readConfigFile(filePath: string): Promise<ConfigFile> {
   }
   if (typeof obj.memoryPath === "string" && obj.memoryPath.trim())
     config.memoryPath = resolveTilde(obj.memoryPath.trim());
+  const defaultMode = parseAgentMode(obj.defaultMode);
+  if (defaultMode != null) config.defaultMode = defaultMode;
   return config;
 }
 
@@ -350,6 +376,7 @@ export async function loadConfig(options: LoadConfigOptions): Promise<ResolvedCo
     baseURL: DEFAULT_BASE_URL,
     policy: { ...DEFAULT_LOOP_POLICY },
     approval: DEFAULT_APPROVAL,
+    mode: DEFAULT_AGENT_MODE,
     verbose: false,
     dryRun: false,
     globalSkillDirs: getDefaultGlobalSkillDirs(),
@@ -386,6 +413,7 @@ export async function loadConfig(options: LoadConfigOptions): Promise<ResolvedCo
     if (fileConfig.autoMemoryEnabled != null) merged.autoMemoryEnabled = fileConfig.autoMemoryEnabled;
     if (fileConfig.claudeMdExcludes != null) merged.claudeMdExcludes = [...fileConfig.claudeMdExcludes];
     if (fileConfig.memoryPath != null) merged.memoryPath = fileConfig.memoryPath;
+    if (fileConfig.defaultMode != null) merged.mode = fileConfig.defaultMode;
   }
 
   const projectMcp = await readProjectMcpJson(cwd);
@@ -425,6 +453,7 @@ export async function loadConfig(options: LoadConfigOptions): Promise<ResolvedCo
   if (cli.model != null) merged.model = cli.model;
   if (cli.transcriptDir != null) merged.transcriptDir = cli.transcriptDir;
   if (cli.approval != null) merged.approval = cli.approval;
+  if (cli.mode != null) merged.mode = cli.mode;
   if (cli.verbose != null) merged.verbose = cli.verbose;
   if (cli.dryRun != null) merged.dryRun = cli.dryRun;
   if (cli.policy != null) merged.policy = mergePolicy(merged.policy, cli.policy);

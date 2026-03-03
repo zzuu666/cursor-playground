@@ -7,8 +7,8 @@ import type {
 } from "../agent/session.js";
 import { retryWithBackoff } from "../infra/retry.js";
 import { SYSTEM_PROMPT } from "../prompts/system.js";
-import type { ChatProvider } from "./base.js";
-import type { ToolInputSchema } from "../tools/types.js";
+import type { CompleteOptions, ChatProvider } from "./base.js";
+import type { Tool, ToolInputSchema } from "../tools/types.js";
 
 /** OpenAI 兼容 API 的 tool 定义（name, description, parameters 为 JSON Schema）。 */
 export interface OpenAIToolSpec {
@@ -130,6 +130,17 @@ function fromOpenAIMessage(
   return out;
 }
 
+function toolsToOpenAISpec(tools: OpenAIToolSpec[] | Tool[]): OpenAIToolSpec[] {
+  if (tools.length === 0) return [];
+  const first = tools[0]!;
+  if ("parameters" in first) return tools as OpenAIToolSpec[];
+  return (tools as Tool[]).map((t) => ({
+    name: t.name,
+    description: t.description,
+    parameters: t.inputSchema,
+  }));
+}
+
 export class OpenAICompatibleProvider implements ChatProvider {
   readonly name: string;
   private readonly client: OpenAI;
@@ -152,16 +163,23 @@ export class OpenAICompatibleProvider implements ChatProvider {
     this.systemPrompt = options.systemPrompt ?? SYSTEM_PROMPT;
   }
 
-  async complete(messages: ConversationMessage[]): Promise<AssistantContentBlock[]> {
+  async complete(
+    messages: ConversationMessage[],
+    options?: CompleteOptions
+  ): Promise<AssistantContentBlock[]> {
+    const tools = toolsToOpenAISpec(options?.tools ?? this.tools);
+    const systemPrompt =
+      this.systemPrompt +
+      (options?.systemPromptSuffix ? "\n\n" + options.systemPromptSuffix : "");
     return retryWithBackoff(
       async () => {
         const params: OpenAI.Chat.ChatCompletionCreateParamsNonStreaming = {
           model: this.model,
           max_tokens: MAX_TOKENS,
-          messages: toOpenAIMessages(messages, this.systemPrompt),
+          messages: toOpenAIMessages(messages, systemPrompt),
         };
-        if (this.tools.length > 0) {
-          params.tools = this.tools.map((t) => ({
+        if (tools.length > 0) {
+          params.tools = tools.map((t) => ({
             type: "function" as const,
             function: {
               name: t.name,

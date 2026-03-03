@@ -2,11 +2,13 @@
  * Phase 14: Ink TUI 根组件——状态栏、内容区、输入区，执行 runOneTurn、批准、退出写 transcript。
  */
 import React, { useState, useCallback, useRef } from "react";
-import { Box, Text } from "ink";
+import { Box, Text, useInput } from "ink";
 import { StatusBar } from "./StatusBar.js";
 import { ContentArea, messagesToDisplayLines } from "./ContentArea.js";
 import { InputArea } from "./InputArea.js";
 import type { TuiOptions } from "./types.js";
+import type { AgentMode } from "../config.js";
+import { AGENT_MODE } from "../config.js";
 import { estimateTokens } from "../agent/token-estimate.js";
 import { LoopLimitError, LoopSpinDetectedError } from "../infra/errors.js";
 import { appendErrorLog } from "../infra/logger.js";
@@ -33,6 +35,9 @@ export function App({ options }: AppProps): React.ReactElement {
   const [approvalPrompt, setApprovalPrompt] = useState<string | null>(null);
   const [isRunning, setIsRunning] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [currentMode, setCurrentMode] = useState<AgentMode>(
+    () => options.resolved.mode ?? AGENT_MODE.Agent
+  );
   const pendingApprovalResolve = useRef<
     ((v: { approved: boolean; reason?: string }) => void) | null
   >(null);
@@ -41,6 +46,14 @@ export function App({ options }: AppProps): React.ReactElement {
   const displayLines = messagesToDisplayLines(messages);
   const estimatedTokens = estimateTokens(messages);
   const autoMemory = options.transcriptMeta.autoMemoryLoaded;
+
+  useInput((_input, key) => {
+    if (key.tab && key.shift) {
+      setCurrentMode((prev) =>
+        prev === AGENT_MODE.Agent ? AGENT_MODE.Plan : AGENT_MODE.Agent
+      );
+    }
+  });
 
   const handleSubmit = useCallback(
     async (value: string) => {
@@ -85,7 +98,9 @@ export function App({ options }: AppProps): React.ReactElement {
           : undefined;
 
       try {
-        const overrides: Parameters<typeof runOneTurn>[1] = {};
+        const overrides: Parameters<typeof runOneTurn>[1] = {
+          mode: currentMode,
+        };
         if (stream && provider.streamComplete) {
           overrides.onStreamText = (delta: string) =>
             setStreamingText((prev) => prev + delta);
@@ -134,6 +149,7 @@ export function App({ options }: AppProps): React.ReactElement {
       provider,
       runOneTurn,
       stream,
+      currentMode,
       sessionId,
       transcriptDir,
       writeTranscript,
@@ -149,6 +165,7 @@ export function App({ options }: AppProps): React.ReactElement {
         provider={resolved.provider}
         model={resolved.model}
         approval={resolved.approval}
+        mode={currentMode}
         messageCount={messages.length}
         estimatedTokens={estimatedTokens}
         autoMemory={autoMemory}

@@ -14,4 +14,9 @@ export class ToolRegistry {
   list(): Tool[] {
     return Array.from(this.tools.values());
   }
+
+  /** 返回仅只读工具列表，供 Plan 模式使用。 */
+  listReadOnly(): Tool[] {
+    return this.list().filter((t) => t.readOnly === true);
+  }
 }

@@ -4,7 +4,7 @@
 import type { AgentLoop } from "../agent/loop.js";
 import type { LoopResult } from "../agent/loop.js";
 import type { AgentSession } from "../agent/session.js";
-import type { ResolvedConfig } from "../config.js";
+import type { AgentMode, ResolvedConfig } from "../config.js";
 import type { TranscriptPayload } from "../infra/logger.js";
 import type { ChatProvider } from "../providers/base.js";
 import type { ToolRegistry } from "../tools/registry.js";
@@ -16,6 +16,8 @@ export interface RunOneTurnOverrides {
     toolName: string,
     inputSummary: string
   ) => Promise<{ approved: boolean; reason?: string }>;
+  /** 当前运行模式，TUI 切换后传入。 */
+  mode?: AgentMode;
 }
 
 /** 供 TUI 调用的「执行一轮」函数：固定 loop/session/provider，仅覆盖 stream 与 approval。 */

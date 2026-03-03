@@ -9,7 +9,7 @@ const require = createRequire(import.meta.url);
 const pkg = require("../package.json") as { version: string };
 import { AgentLoop, type LoopResult } from "./agent/loop.js";
 import { AgentSession } from "./agent/session.js";
-import { loadConfig, type ResolvedConfig } from "./config.js";
+import { AGENT_MODE, loadConfig, type AgentMode, type ResolvedConfig } from "./config.js";
 import { EXIT_BUSINESS, EXIT_CONFIG } from "./infra/exit-codes.js";
 import { LoopLimitError, LoopSpinDetectedError } from "./infra/errors.js";
 import {
@@ -62,6 +62,7 @@ type RunOneTurnOpts = {
   stream: boolean;
   verbose: boolean;
   approvalMode: ResolvedConfig["approval"];
+  mode?: AgentMode;
   onStreamText?: (delta: string) => void;
   onApprovalRequest?: (toolName: string, inputSummary: string) => Promise<{ approved: boolean; reason?: string }>;
   getMemoryFragment?: () => Promise<string>;
@@ -79,6 +80,7 @@ function runOneTurn(
   const runOptions = {
     verbose: opts.verbose,
     approvalMode: opts.approvalMode,
+    mode: opts.mode ?? AGENT_MODE.Agent,
     ...(opts.onApprovalRequest != null && { onApprovalRequest: opts.onApprovalRequest }),
     ...(opts.onStreamText != null
       ? { onStreamText: opts.onStreamText }
@@ -122,6 +124,7 @@ async function main(): Promise<void> {
     .option("--stream", "stream model output token-by-token")
     .option("-t, --transcript-dir <path>", "transcript output directory")
     .option("--approval <mode>", "tool approval: never | auto | prompt", "auto")
+    .option("--mode <mode>", "run mode: agent | plan (plan = read-only tools only)", "agent")
     .option("--verbose", "print per-turn request/response summary and tool in/out lengths")
     .option("--dry-run", "only print prompt and tool list, do not call LLM or tools")
     .option("--skill <paths...>", "path(s) to SKILL.md or skill dir (e.g. --skill path1 path2)")
@@ -149,6 +152,7 @@ async function main(): Promise<void> {
     stream: boolean;
     transcriptDir?: string;
     approval: string;
+    mode?: string;
     verbose: boolean;
     dryRun: boolean;
     skill?: string[];
@@ -171,9 +175,14 @@ async function main(): Promise<void> {
       opts.approval === "never" || opts.approval === "auto" || opts.approval === "prompt"
         ? opts.approval
         : "auto";
+    const mode: AgentMode =
+      opts.mode === AGENT_MODE.Agent || opts.mode === AGENT_MODE.Plan
+        ? (opts.mode as AgentMode)
+        : AGENT_MODE.Agent;
     const cliOverrides: Parameters<typeof loadConfig>[0]["cli"] = {
       provider: opts.provider,
       approval: approvalMode,
+      mode,
       verbose: opts.verbose ?? false,
       dryRun: opts.dryRun ?? false,
     };
@@ -407,6 +416,7 @@ async function main(): Promise<void> {
       stream: opts.stream ?? false,
       verbose: resolved.verbose,
       approvalMode: effectiveApproval,
+      mode: resolved.mode,
       ...(effectiveApproval === "prompt" && input.isTTY && {
         onApprovalRequest: buildApprovalHandler(approvalRl),
       }),
@@ -497,16 +507,20 @@ async function main(): Promise<void> {
       stream: opts.stream ?? false,
       verbose: resolved.verbose,
       approvalMode: effectiveApproval,
+      mode: resolved.mode,
       getMemoryFragment,
       ...(onBeforeCompress != null && { onBeforeCompress }),
     };
     const runOneTurnForTui = (
       prompt: string,
-      overrides: { onStreamText?: (delta: string) => void; onApprovalRequest?: RunOneTurnOpts["onApprovalRequest"] }
+      overrides: import("./tui/types.js").RunOneTurnOverrides
     ) => {
-      const opts: RunOneTurnOpts = { ...baseRunOpts };
-      if (overrides.onStreamText != null) opts.onStreamText = overrides.onStreamText;
-      if (overrides.onApprovalRequest != null) opts.onApprovalRequest = overrides.onApprovalRequest;
+      const mode: AgentMode = overrides.mode ?? baseRunOpts.mode ?? "agent";
+      const opts: RunOneTurnOpts = {
+        ...baseRunOpts,
+        ...overrides,
+        mode,
+      };
       return runOneTurn(loop, session, prompt, opts, provider);
     };
     await runTui({
@@ -555,6 +569,7 @@ async function main(): Promise<void> {
     stream: opts.stream ?? false,
     verbose: resolved.verbose,
     approvalMode: effectiveApproval,
+    mode: resolved.mode,
     ...(effectiveApproval === "prompt" && input.isTTY && { onApprovalRequest: buildApprovalHandler(rl) }),
     getMemoryFragment,
     ...(onBeforeCompress != null && { onBeforeCompress }),
