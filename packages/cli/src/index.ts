@@ -37,6 +37,7 @@ import { ToolRegistry } from "./tools/registry.js";
 import { SYSTEM_PROMPT } from "./prompts/system.js";
 import { findClaudeMdPaths, loadClaudeMdContent, mergeAndTag } from "./memory/claude-md.js";
 import { appendToMemoryMd, getProjectId, getAutoMemoryFragment } from "./memory/auto-memory.js";
+import { runTui } from "./tui/index.js";
 
 async function readFromStdin(): Promise<string> {
   const chunks: Buffer[] = [];
@@ -61,6 +62,7 @@ type RunOneTurnOpts = {
   stream: boolean;
   verbose: boolean;
   approvalMode: ResolvedConfig["approval"];
+  onStreamText?: (delta: string) => void;
   onApprovalRequest?: (toolName: string, inputSummary: string) => Promise<{ approved: boolean; reason?: string }>;
   getMemoryFragment?: () => Promise<string>;
   /** Phase 13: 压缩前将规则摘要写入 Auto Memory。 */
@@ -78,7 +80,9 @@ function runOneTurn(
     verbose: opts.verbose,
     approvalMode: opts.approvalMode,
     ...(opts.onApprovalRequest != null && { onApprovalRequest: opts.onApprovalRequest }),
-    ...(opts.stream && provider.streamComplete && { onStreamText: (delta: string) => output.write(delta) }),
+    ...(opts.onStreamText != null
+      ? { onStreamText: opts.onStreamText }
+      : opts.stream && provider.streamComplete && { onStreamText: (delta: string) => output.write(delta) }),
     ...(opts.getMemoryFragment != null && { getMemoryFragment: opts.getMemoryFragment }),
     ...(opts.onBeforeCompress != null && { onBeforeCompress: opts.onBeforeCompress }),
   };
@@ -130,6 +134,7 @@ async function main(): Promise<void> {
     .option("--compress-strategy <s>", "Phase 13: message_count | token_based", "message_count")
     .option("--use-llm-summary", "Phase 13: use LLM for context compression summary (fallback to rule)")
     .option("--compress-write-memory", "Phase 13: write rule summary to Auto Memory before compressing")
+    .option("--tui", "use Ink TUI for REPL (requires TTY)")
     .addHelpText(
       "after",
       "\nExample:\n  mini-agent --provider mock --prompt \"hello\"\n  mini-agent --provider deepseek --approval prompt --prompt \"write a ts file\"\n"
@@ -156,6 +161,7 @@ async function main(): Promise<void> {
     compressStrategy?: string;
     useLlmSummary?: boolean;
     compressWriteMemory?: boolean;
+    tui?: boolean;
   }>();
 
   const cliMcpNames = Array.isArray(opts.mcp) ? opts.mcp : typeof opts.mcp === "string" ? [opts.mcp] : [];
@@ -479,7 +485,66 @@ async function main(): Promise<void> {
 
   if (!input.isTTY) {
     process.stderr.write("mini-agent failed: Please pass --prompt or run in TTY for REPL.\n");
+    if (opts.tui) {
+      process.stderr.write("mini-agent: --tui requires TTY; run in a terminal or omit --tui.\n");
+    }
     process.exitCode = EXIT_BUSINESS;
+    return;
+  }
+
+  if (opts.tui) {
+    const baseRunOpts: RunOneTurnOpts = {
+      stream: opts.stream ?? false,
+      verbose: resolved.verbose,
+      approvalMode: effectiveApproval,
+      getMemoryFragment,
+      ...(onBeforeCompress != null && { onBeforeCompress }),
+    };
+    const runOneTurnForTui = (
+      prompt: string,
+      overrides: { onStreamText?: (delta: string) => void; onApprovalRequest?: RunOneTurnOpts["onApprovalRequest"] }
+    ) => {
+      const opts: RunOneTurnOpts = { ...baseRunOpts };
+      if (overrides.onStreamText != null) opts.onStreamText = overrides.onStreamText;
+      if (overrides.onApprovalRequest != null) opts.onApprovalRequest = overrides.onApprovalRequest;
+      return runOneTurn(loop, session, prompt, opts, provider);
+    };
+    await runTui({
+      resolved,
+      provider,
+      session,
+      loop,
+      registry,
+      runOneTurn: runOneTurnForTui,
+      getMemoryFragment,
+      sessionId,
+      transcriptDir: resolved.transcriptDir,
+      writeTranscript,
+      transcriptMeta: {
+        ...(skillsLoaded != null && skillsLoaded.length > 0 && { skillsLoaded }),
+        ...(pluginsLoaded.length > 0 && { pluginsLoaded }),
+        ...(mcpServersLoaded.length > 0 && { mcpServersLoaded }),
+        ...(claudeMdLoaded != null && claudeMdLoaded.length > 0 && { claudeMdLoaded }),
+        ...(autoMemoryLoaded != null && { autoMemoryLoaded }),
+      },
+      stream: opts.stream ?? false,
+      onExit: async () => {
+        const transcriptPath = await writeTranscript(resolved.transcriptDir, {
+          sessionId,
+          createdAt: new Date().toISOString(),
+          provider: provider.name,
+          policy: resolved.policy,
+          messages: session.getMessages(),
+          ...(skillsLoaded != null && skillsLoaded.length > 0 && { skillsLoaded }),
+          ...(pluginsLoaded.length > 0 && { pluginsLoaded }),
+          ...(mcpServersLoaded.length > 0 && { mcpServersLoaded }),
+          ...(claudeMdLoaded != null && claudeMdLoaded.length > 0 && { claudeMdLoaded }),
+          ...(autoMemoryLoaded != null && { autoMemoryLoaded }),
+        });
+        process.stdout.write(`sessionId=${sessionId} transcript=${transcriptPath}\n`);
+        clearSessionId();
+      },
+    });
     return;
   }
 
