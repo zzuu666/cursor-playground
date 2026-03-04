@@ -99,13 +99,14 @@ export function createExecuteCommandTool(options: ExecuteCommandOptions): Tool {
   return {
     name: "execute_command",
     description:
-      "Run a shell command in the workspace directory. Only whitelisted executables are allowed (e.g. npm, pnpm, node, npx, yarn, git, tsx, tsc). Dangerous commands are rejected. Output is truncated to 32KB. This tool requires user approval when --approval prompt.",
+      "Run a shell command in the workspace root directory. Do not use 'cd'; the command always runs from the workspace root (use -p path or pass paths for tools like tsc). Only whitelisted executables are allowed (e.g. npm, pnpm, node, npx, yarn, git, tsx, tsc). Dangerous commands are rejected. Output is truncated to 32KB. This tool requires user approval when --approval prompt.",
     inputSchema: {
       type: "object",
       properties: {
         command: {
           type: "string",
-          description: "Command line to run (e.g. 'npm install', 'npx tsc --noEmit')",
+          description:
+            "Command line to run from workspace root (e.g. 'git status --porcelain', 'npx tsc --noEmit -p packages/cli/tsconfig.json'). Do not use 'cd'.",
         },
       },
       required: ["command"],

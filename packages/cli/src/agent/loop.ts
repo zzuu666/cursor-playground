@@ -39,7 +39,7 @@ function toolCallFingerprint(name: string, input: Record<string, unknown>): stri
 
 /** Phase 13: 将 messages 序列化为给 LLM 摘要用的文本，并截断到 maxChars。 */
 function serializeForSummary(messages: ConversationMessage[], maxChars: number): string {
-  const parts: string[] = [];3
+  const parts: string[] = [];
   let len = 0;
   for (const msg of messages) {
     let s: string;

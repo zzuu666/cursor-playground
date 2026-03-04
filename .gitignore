@@ -8,3 +8,5 @@ coverage/
 
 packages/*/dist/
 packages/*/transcripts/
+
+references/

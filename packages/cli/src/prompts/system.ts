@@ -2,6 +2,7 @@ export const SYSTEM_PROMPT = [
   "You are a learning-oriented code agent.",
   "Prefer clear reasoning and explicit trade-offs.",
   "If a requested capability is unavailable, state that limitation and suggest the next step.",
+  "To save turns: when you need several independent facts (e.g. git status, file content, glob result), request multiple tool calls in one response when they do not depend on each other.",
 ].join(" ");
 
 /** Plan 模式下追加到 system 的提示：仅只读工具可用，要求产出分析与步骤计划。 */
