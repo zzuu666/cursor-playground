@@ -96,6 +96,11 @@ export class AgentSession {
     return this.messages;
   }
 
+  /** Remove all messages, keeping session object reusable. */
+  clear(): void {
+    this.messages.length = 0;
+  }
+
   /**
    * 收集消息列表中所有 assistant 的 tool_use id，用于判断 tool_result 是否成对存在。
    */

@@ -27,7 +27,8 @@ import { getPluginMcpServers } from "./plugins/plugin-mcp.js";
 import { connectAndListTools } from "./mcp/client.js";
 import { createToolAdapters } from "./mcp/adapter.js";
 import { buildSystemPrompt } from "./skills/build-system-prompt.js";
-import { loadAllGlobalSkills, loadSkills } from "./skills/load.js";
+import { loadAllGlobalSkills, loadSkills, type SkillEntry } from "./skills/load.js";
+import { dispatchSlash, EXIT_SENTINEL } from "./commands/slash.js";
 import { createExecuteCommandTool } from "./tools/execute-command.js";
 import { createGlobSearchTool } from "./tools/glob-search.js";
 import { createReadFileTool } from "./tools/read-file.js";
@@ -534,6 +535,7 @@ async function main(): Promise<void> {
       sessionId,
       transcriptDir: resolved.transcriptDir,
       writeTranscript,
+      skills: allEntries,
       transcriptMeta: {
         ...(skillsLoaded != null && skillsLoaded.length > 0 && { skillsLoaded }),
         ...(pluginsLoaded.length > 0 && { pluginsLoaded }),
@@ -581,8 +583,20 @@ async function main(): Promise<void> {
     });
     const prompt = line.trim();
     if (prompt.length === 0) break;
+
+    const slashResult = await dispatchSlash(prompt, {
+      session,
+      policy: resolved.policy,
+      skills: allEntries,
+    });
+    if (slashResult.handled) {
+      if (slashResult.message === EXIT_SENTINEL) break;
+      output.write(`${slashResult.message}\n`);
+      continue;
+    }
+
     try {
-      const result = await runOneTurn(loop, session, prompt, replRunOpts, provider);
+      const result = await runOneTurn(loop, session, slashResult.prompt, replRunOpts, provider);
       if (!opts.stream && result.finalText) {
         output.write(`${result.finalText}\n`);
       }

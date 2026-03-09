@@ -1,6 +1,6 @@
 import { readFile, readdir, stat } from "node:fs/promises";
 import { existsSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { basename, join, resolve } from "node:path";
 
 /** 约定目录内识别的 Skill 文件名 */
 const SKILL_FILE_NAMES = ["SKILL.md", "skill.json"] as const;
@@ -10,28 +10,52 @@ export interface SkillEntry {
   path: string;
   content: string;
   charCount: number;
+  /** Slash-invocable name parsed from frontmatter `name` field, or derived from directory/file name. */
+  name?: string;
+  /** Short description parsed from frontmatter `description` field. */
+  description?: string;
+}
+
+interface ParsedSkillMd {
+  content: string;
+  name?: string;
+  description?: string;
 }
 
 /**
- * 从 SKILL.md 文本解析出 description（来自 frontmatter）与 body，拼接为 content。
+ * 从 SKILL.md 文本解析出 name、description（来自 frontmatter）与 body，拼接为 content。
  * 若无 frontmatter，整文件作为 content。
  */
-function parseSkillMd(raw: string): string {
+function parseSkillMd(raw: string): ParsedSkillMd {
   const match = raw.match(/^---\s*\r?\n([\s\S]*?)\r?\n---\s*\r?\n([\s\S]*)$/);
-  if (!match) return raw.trim();
+  if (!match) return { content: raw.trim() };
 
   const frontmatter = match[1];
   const body = match[2];
-  if (frontmatter == null || body == null) return raw.trim();
+  if (frontmatter == null || body == null) return { content: raw.trim() };
+
+  let name: string | undefined;
+  let description: string | undefined;
+
+  const nameMatch = frontmatter.match(/^name\s*:\s*(.+)$/m);
+  if (nameMatch?.[1]) {
+    name = nameMatch[1].trim().replace(/^["']|["']$/g, "") || undefined;
+  }
+
+  const descMatch = frontmatter.match(/^description\s*:\s*(.+)$/m);
+  if (descMatch?.[1]) {
+    description = descMatch[1].trim().replace(/^["']|["']$/g, "") || undefined;
+  }
 
   const parts: string[] = [];
-  const descMatch = frontmatter.match(/^description\s*:\s*(.+)$/m);
-  if (descMatch && descMatch[1]) {
-    const desc = descMatch[1].trim().replace(/^["']|["']$/g, "");
-    if (desc) parts.push(desc);
-  }
+  if (description) parts.push(description);
   if (body.trim()) parts.push(body.trim());
-  return parts.join("\n\n");
+
+  return {
+    content: parts.join("\n\n"),
+    ...(name != null && { name }),
+    ...(description != null && { description }),
+  };
 }
 
 /**
@@ -51,18 +75,34 @@ function parseSkillJson(raw: string): string {
 
 /**
  * 加载单个文件为 Skill 条目。path 为绝对路径，displayPath 用于来源标记（可为相对路径）。
+ * fallbackName 用于当 frontmatter 未指定 name 时的回退名称（通常为目录名）。
  */
 async function loadOneFile(
   absolutePath: string,
-  displayPath: string
+  displayPath: string,
+  fallbackName?: string
 ): Promise<SkillEntry | null> {
   if (!existsSync(absolutePath)) return null;
   const raw = await readFile(absolutePath, "utf-8");
   const ext = absolutePath.endsWith(".json") ? "json" : "md";
-  const content =
-    ext === "json" ? parseSkillJson(raw) : parseSkillMd(raw);
-  if (!content) return null;
-  return { path: displayPath, content, charCount: content.length };
+  if (ext === "json") {
+    const content = parseSkillJson(raw);
+    if (!content) return null;
+    return {
+      path: displayPath, content, charCount: content.length,
+      ...(fallbackName != null && { name: fallbackName }),
+    };
+  }
+  const parsed = parseSkillMd(raw);
+  if (!parsed.content) return null;
+  const skillName = parsed.name ?? fallbackName;
+  return {
+    path: displayPath,
+    content: parsed.content,
+    charCount: parsed.content.length,
+    ...(skillName != null && { name: skillName }),
+    ...(parsed.description != null && { description: parsed.description }),
+  };
 }
 
 /**
@@ -75,11 +115,12 @@ async function loadFromDir(
   if (!existsSync(dirPath)) return [];
   const entries = await readdir(dirPath, { withFileTypes: true });
   const results: SkillEntry[] = [];
+  const dirBaseName = dirPath.split("/").pop() ?? dirPath;
   for (const name of SKILL_FILE_NAMES) {
     const found = entries.find((e) => e.isFile() && e.name === name);
     if (found) {
       const abs = join(dirPath, found.name);
-      const entry = await loadOneFile(abs, `${displayPath}/${found.name}`);
+      const entry = await loadOneFile(abs, `${displayPath}/${found.name}`, dirBaseName);
       if (entry) results.push(entry);
     }
   }
@@ -104,7 +145,7 @@ export async function loadGlobalSkillsFromRoot(
       const abs = join(subDir, name);
       if (!existsSync(abs)) continue;
       const displayPath = `${pathPrefix}:${e.name}`;
-      const entry = await loadOneFile(abs, displayPath);
+      const entry = await loadOneFile(abs, displayPath, e.name);
       if (entry) {
         results.push(entry);
         break;
@@ -167,7 +208,8 @@ export async function loadSkills(
     if (st.isFile()) {
       const lower = absolute.toLowerCase();
       if (lower.endsWith(".json") || lower.endsWith(".md")) {
-        const entry = await loadOneFile(absolute, p);
+        const fallback = basename(absolute).replace(/\.(md|json)$/i, "");
+        const entry = await loadOneFile(absolute, p, fallback);
         if (entry) results.push(entry);
       }
     } else if (st.isDirectory()) {

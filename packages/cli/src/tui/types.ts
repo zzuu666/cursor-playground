@@ -7,6 +7,7 @@ import type { AgentSession } from "../agent/session.js";
 import type { AgentMode, ResolvedConfig } from "../config.js";
 import type { TranscriptPayload } from "../infra/logger.js";
 import type { ChatProvider } from "../providers/base.js";
+import type { SkillEntry } from "../skills/load.js";
 import type { ToolRegistry } from "../tools/registry.js";
 
 /** 单次运行的选项覆盖（流式回调和批准回调由 TUI 注入）。 */
@@ -53,6 +54,8 @@ export interface TuiOptions {
     claudeMdLoaded?: { path: string; source: "project" | "user" | "local"; lineCount?: number }[];
     autoMemoryLoaded?: AutoMemoryLoaded;
   };
+  /** Loaded skill entries for slash command dispatch. */
+  skills: SkillEntry[];
   /** 是否启用流式输出。 */
   stream: boolean;
   /** 退出 TUI 时调用（写 transcript、clearSessionId 等），在 unmount 前 await。 */
